@@ -1,4 +1,3 @@
-@'
 # USAGE
 
 ## 0) One-time setup
