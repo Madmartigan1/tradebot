@@ -1,0 +1,16 @@
+﻿# secrets
+APIkeys.env
+*.env
+
+# runtime state
+.state/
+__pycache__/
+*.pyc
+
+# venvs
+.venv/
+.env/
+
+# OS cruft
+.DS_Store
+Thumbs.db
