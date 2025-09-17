@@ -14,3 +14,4 @@ __pycache__/
 # OS cruft
 .DS_Store
 Thumbs.db
+'n*.docx'n*diff.txt
