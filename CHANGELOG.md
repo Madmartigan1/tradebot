@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+## [v0.2.0] - 2025-09-17
+### Added
+- EMA crossover **dead-band** (`ema_deadband_bps=8.0`) to reduce signal flapping. 
+- Immediate-fills reconciliation after live orders (updates positions/P&L; aggregates fees & liquidity flags).
+- Cap on processed fills (`processed_fills_max`) to prune the dedupe store over time.
+- Rotating file logging helper in `bot/logging_setup.py`.
+
+### Changed
+- Defaults tightened: `short_ema=40`, `long_ema=120`, `min_ticks=120`; several per-product `min_ticks` increased.
+- Risk controls bumped: `usd_per_order=5`, `max_usd_per_day=40`, `cooldown_sec=720`, `max_loss_bps=140`.
+- Maker math now lives in `bot/orders.py` and is used by `TradeBot.place_order`.
+- Exchange increments fetched at startup and used for compliant rounding/formatting.
+- Quote cache (bid/ask/last) used for maker pricing.
+
+### Improved
+- More informative session footer (P&L + runtime) on shutdown.
+- More robust portfolio reconciliation both on startup and immediately after orders.
+
+### Notes
+- Env template unchanged (`APIkeys.env.example`); keep real `APIkeys.env` local.
+- If you want previous RSI behavior, set `rsi_buy_floor=30`, `rsi_sell_ceiling=70` in `bot/config.py`.
+
+
 ## [v0.1.1-betaB] - 2025-09-17
 ### Added
 - `bot/utils.py` centralizes state paths, JSON read/write, daily spend & cooldown tracking, and trade-log writing.
