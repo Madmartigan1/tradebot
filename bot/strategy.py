@@ -1,3 +1,4 @@
+# bot/strategy.py
 from dataclasses import dataclass
 from typing import Optional
 
@@ -13,28 +14,42 @@ class AdvisorSettings:
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    macd_buy_min_hist: float = -0.05
-    macd_sell_max_hist: float =  0.05
+    # normalized option (bps of price); keep thresholds at 0 for sign-only behavior
+    normalize_macd: bool = True
+    macd_buy_min: float = 0.0    # bps if normalized, raw hist otherwise
+    macd_sell_max: float = 0.0   # bps if normalized, raw hist otherwise
 
-def advisor_allows(side: str,
-                   rsi_value: Optional[float],
-                   macd_hist: Optional[float],
-                   settings: AdvisorSettings) -> bool:
+def _macd_metric(hist: Optional[float], price: Optional[float], normalize: bool) -> Optional[float]:
+    if hist is None:
+        return None
+    if not normalize or price is None or price <= 0:
+        return hist
+    return 10_000.0 * (hist / price)  # convert to bps
+
+def advisor_allows(
+    side: str,
+    rsi_value: Optional[float],
+    macd_hist: Optional[float],
+    settings: AdvisorSettings,
+    last_price: Optional[float] = None,
+) -> bool:
     """EMA is captain; advisors veto only if *clearly* bad."""
     s = side.upper()
-    if s == "BUY":
-        if settings.enable_rsi and rsi_value is not None:
+
+    if settings.enable_rsi and rsi_value is not None:
+        if s == "BUY":
             if not (settings.rsi_buy_min <= rsi_value <= settings.rsi_buy_max):
                 return False
-        if settings.enable_macd and macd_hist is not None:
-            if macd_hist < settings.macd_buy_min_hist:
-                return False
-        return True
-    else:  # SELL
-        if settings.enable_rsi and rsi_value is not None:
+        else:
             if not (settings.rsi_sell_min <= rsi_value <= settings.rsi_sell_max):
                 return False
-        if settings.enable_macd and macd_hist is not None:
-            if macd_hist > settings.macd_sell_max_hist:
+
+    if settings.enable_macd:
+        m = _macd_metric(macd_hist, last_price, settings.normalize_macd)
+        if m is not None:
+            if s == "BUY" and m < settings.macd_buy_min:
                 return False
-        return True
+            if s == "SELL" and m > settings.macd_sell_max:
+                return False
+
+    return True

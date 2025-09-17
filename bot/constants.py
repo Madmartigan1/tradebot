@@ -1,11 +1,17 @@
+# bot/constants.py
+import os
 from pathlib import Path
 
-# Display precision for realized P&L
 PNL_DECIMALS = 8
 
-# State files
-STATE_DIR = Path(".state")
-STATE_DIR.mkdir(exist_ok=True)
+# Default to <repo>/.state; allow override via BOT_STATE_DIR
+_default_state = (Path(__file__).resolve().parent / ".." / ".state").resolve()
+STATE_DIR = Path(os.getenv("BOT_STATE_DIR", str(_default_state)))
+
+try:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    pass
 
 DAILY_FILE = STATE_DIR / "daily_spend.json"
 LASTTRADE_FILE = STATE_DIR / "last_trades.json"
