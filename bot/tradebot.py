@@ -1,133 +1,39 @@
 # bot/tradebot.py
-import os
-import sys
 import json
+import logging
 import time
 import uuid
-import asyncio
-import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
-from dotenv import load_dotenv
 from coinbase.rest import RESTClient
 from coinbase.websocket import WSClient
 
-from .config import BotConfig
-from .indicators import RSI, MACD  # simple streaming indicators with .update(price)
-
-# ------------------------------ #
-# Constants / Files / Formatting #
-# ------------------------------ #
-PNL_DECIMALS = 8
-
-STATE_DIR = Path(".state")
-STATE_DIR.mkdir(exist_ok=True)
-DAILY_FILE = STATE_DIR / "daily_spend.json"
-LASTTRADE_FILE = STATE_DIR / "last_trades.json"
-TRADE_LOG_FILE = STATE_DIR / "trade_log.txt"
-PORTFOLIO_FILE = STATE_DIR / "portfolio.json"
-PROCESSED_FILLS_FILE = STATE_DIR / "processed_fills.json"
-
-# advisor thresholds (tweak later or move to config if you like)
-RSI_OVERBOUGHT = 70.0
-RSI_OVERSOLD   = 30.0
-# MACD veto uses sign of histogram: >0 bullish momentum, <0 bearish momentum
+from .utils import (
+    PNL_DECIMALS,
+    TRADE_LOG_FILE,
+    PORTFOLIO_FILE,
+    PROCESSED_FILLS_FILE,
+    log_trade,
+    load_json,
+    save_json,
+    SpendTracker,
+    LastTradeTracker,
+)
+from .indicators import EMA, RSI, MACD
 
 
-# ------------------------------ #
-# Small helpers                  #
-# ------------------------------ #
-def load_json(path: Path, default):
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return default
-
-def save_json(path: Path, data):
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(path)
-
-def log_trade(product_id: str, side: str, usd_amount: float, price: float, quantity: float, dry_run: bool):
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    entry = (
-        f"{ts} | {side:<4} {product_id:<10} "
-        f"USD ${usd_amount:.2f} @ ${price:.6f} "
-        f"Qty {quantity:.8f} "
-        f"{'(DRY RUN)' if dry_run else ''}\n"
-    )
-    with open(TRADE_LOG_FILE, "a") as f:
-        f.write(entry)
-
-
-class SpendTracker:
-    def __init__(self):
-        self.data = load_json(DAILY_FILE, {})
-
-    def _day_key(self) -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    def add(self, usd: float):
-        k = self._day_key()
-        self.data.setdefault(k, 0.0)
-        self.data[k] += float(usd)
-        save_json(DAILY_FILE, self.data)
-
-    def today_total(self) -> float:
-        return float(self.data.get(self._day_key(), 0.0))
-
-
-class LastTradeTracker:
-    def __init__(self):
-        self.data = load_json(LASTTRADE_FILE, {})
-
-    def ok(self, product_id: str, cooldown_sec: int) -> bool:
-        t = self.data.get(product_id)
-        if not t:
-            return True
-        return (time.time() - float(t)) >= cooldown_sec
-
-    def stamp(self, product_id: str):
-        self.data[product_id] = time.time()
-        save_json(LASTTRADE_FILE, self.data)
-
-
-class EMA:
-    def __init__(self, period: int):
-        self.period = max(1, int(period))
-        self.mult = 2 / (self.period + 1)
-        self.value: Optional[float] = None
-
-    def update(self, price: float) -> float:
-        if self.value is None:
-            self.value = price
-        else:
-            self.value = (price - self.value) * self.mult + self.value
-        return self.value
-
-
-# ------------------------------ #
-# TradeBot                       #
-# ------------------------------ #
 class TradeBot:
-    def __init__(self, cfg: BotConfig, api_key: Optional[str] = None, api_secret: Optional[str] = None):
+    def __init__(self, cfg, api_key: str, api_secret: str, portfolio_id: Optional[str] = None):
         self.cfg = cfg
+        # portfolio_id preference: explicit arg overrides cfg
+        self.portfolio_id = portfolio_id if portfolio_id is not None else getattr(cfg, "portfolio_id", None)
 
-        # API creds (allow env fallback)
-        if not api_key or not api_secret:
-            load_dotenv("APIkeys.env")
-            api_key = api_key or os.getenv("COINBASE_API_KEY")
-            api_secret = api_secret or os.getenv("COINBASE_API_SECRET")
-        if not api_key or not api_secret:
-            raise RuntimeError("Missing COINBASE_API_KEY / COINBASE_API_SECRET.")
-
+        # REST/WS
         self.rest = RESTClient(api_key=api_key, api_secret=api_secret, rate_limit_headers=True)
 
-        # WebSocket setup
         def on_msg(raw):
             try:
                 msg = json.loads(raw)
@@ -138,104 +44,92 @@ class TradeBot:
 
         self.ws = WSClient(api_key=api_key, api_secret=api_secret, on_message=on_msg)
 
-        # Per-product EMA and tick counters
+        # Products + per-product EMA params
+        self.product_ids = list(getattr(self.cfg, "product_ids", []))
+        if not self.product_ids:
+            raise ValueError("No product_ids provided in config.")
+
+        # Indicators storage
         self.short: Dict[str, EMA] = {}
-        self.long:  Dict[str, EMA] = {}
+        self.long: Dict[str, EMA] = {}
         self.ticks: Dict[str, int] = defaultdict(int)
         self.min_ticks_per_product: Dict[str, int] = {}
 
-        # Advisors (per-product RSI & MACD)
-        self.rsi: Dict[str, RSI] = {}
-        self.macd: Dict[str, MACD] = {}
+        # Advisors
+        self.enable_advisors: bool = bool(getattr(self.cfg, "enable_advisors", False))
+        self._rsi = {p: RSI(period=int(getattr(self.cfg, "rsi_period", 14))) for p in self.product_ids}
+        self._macd = {
+            p: MACD(
+                fast=int(getattr(self.cfg, "macd_fast", 12)),
+                slow=int(getattr(self.cfg, "macd_slow", 26)),
+                signal=int(getattr(self.cfg, "macd_signal", 9)),
+            )
+            for p in self.product_ids
+        }
+        self.rsi_buy_floor = float(getattr(self.cfg, "rsi_buy_floor", 30.0))
+        self.rsi_sell_ceiling = float(getattr(self.cfg, "rsi_sell_ceiling", 70.0))
 
-        for p in self.cfg.product_ids:
+        # Stop-loss tolerance (bps). Example 100 = allow up to 1% below cost basis to prevent deadlock.
+        self.max_loss_bps = getattr(self.cfg, "max_loss_bps", None)  # None disables, else float/int
+
+        # Build EMA objects using per-product overrides
+        for p in self.product_ids:
             se, le, mt = self._get_ema_params(p)
             self.short[p] = EMA(se)
-            self.long[p]  = EMA(le)
+            self.long[p] = EMA(le)
             self.min_ticks_per_product[p] = mt
-            # advisors: RSI(14), MACD(12,26,9) default
-            self.rsi[p]  = RSI(period=14)
-            self.macd[p] = MACD(fast=12, slow=26, signal=9)
 
-        # Spend / cooldown
+        # Spend/cooldown
         self.spend = SpendTracker()
         self.last = LastTradeTracker()
 
-        # Portfolio (fills-accurate)
+        # Portfolio from fills
         self.positions: Dict[str, float] = defaultdict(float)
         self.cost_basis: Dict[str, float] = defaultdict(float)
         self.realized_pnl = 0.0
 
-        # P&L baselines
+        # P&L baseline (set after reconciliation)
         self.run_pnl_baseline = 0.0
+
+        # Dry run session cash-flow P&L
         self.session_cash_pnl = 0.0
 
-        # Flags
+        # Session flags/timing
         self.daily_cap_reached_logged = False
         self.stop_requested = False
         self.session_footer_written = False
-
-        # Session start (for runtime)
         self.session_start = datetime.now(timezone.utc)
 
-        # Coinbase product increments
+        # Increments (price/base)
         self.price_inc: Dict[str, float] = {}
         self.base_inc: Dict[str, float] = {}
         self._prime_increments()
 
-        # Persisted state
+        # Load persisted portfolio + processed fills
         self._load_portfolio()
-        self._load_fill_index()
-
-    # ------------------------------ #
-    # Config helpers                 #
-    # ------------------------------ #
-    def _get_ema_params(self, pid: str) -> Tuple[int, int, int]:
-        ovr = self.cfg.ema_params_per_product.get(pid, {})
-        se = int(ovr.get("short_ema", self.cfg.short_ema))
-        le = int(ovr.get("long_ema",  self.cfg.long_ema))
-        mt = int(ovr.get("min_ticks", self.cfg.min_ticks))
-        return se, le, mt
-
-    # ------------------------------ #
-    # Persistence                    #
-    # ------------------------------ #
-    def _load_portfolio(self):
-        data = load_json(PORTFOLIO_FILE, {"positions": {}, "cost_basis": {}, "realized_pnl": 0.0})
-        for k, v in data.get("positions", {}).items():
-            self.positions[k] = float(v)
-        for k, v in data.get("cost_basis", {}).items():
-            self.cost_basis[k] = float(v)
-        self.realized_pnl = float(data.get("realized_pnl", 0.0))
-
-    def _save_portfolio(self):
-        save_json(PORTFOLIO_FILE, {
-            "positions": self.positions,
-            "cost_basis": self.cost_basis,
-            "realized_pnl": float(self.realized_pnl),
-        })
-
-    def _load_fill_index(self):
         self._processed_fills = load_json(PROCESSED_FILLS_FILE, {})
 
-    def _save_fill_index(self):
-        save_json(PROCESSED_FILLS_FILE, self._processed_fills)
+    # -------------------- helpers & config --------------------
+    def _get_ema_params(self, pid: str) -> Tuple[int, int, int]:
+        ovr = getattr(self.cfg, "ema_params_per_product", {}).get(pid, {})
+        se = int(ovr.get("short_ema", getattr(self.cfg, "short_ema", 20)))
+        le = int(ovr.get("long_ema", getattr(self.cfg, "long_ema", 50)))
+        mt = int(ovr.get("min_ticks", getattr(self.cfg, "min_ticks", 60)))
+        return se, le, mt
 
-    # ------------------------------ #
-    # Product increments             #
-    # ------------------------------ #
     def _prime_increments(self):
-        for pid in self.cfg.product_ids:
+        """Fetch exchange increments per product; fallback to sane defaults if API hiccups."""
+        for pid in self.product_ids:
             try:
                 prod = self.rest.get_product(product_id=pid)
                 body = getattr(prod, "to_dict", lambda: {})()
                 price_inc = body.get("price_increment") or body.get("quote_increment") or "0.01"
-                base_inc  = body.get("base_increment") or "0.00000001"
+                base_inc = body.get("base_increment") or "0.00000001"
                 self.price_inc[pid] = float(price_inc)
-                self.base_inc[pid]  = float(base_inc)
+                self.base_inc[pid] = float(base_inc)
             except Exception:
                 self.price_inc[pid] = 0.01
-                self.base_inc[pid]  = 1e-8
+                self.base_inc[pid] = 1e-8
 
     @staticmethod
     def _round_down_to_inc(value: float, inc: float) -> float:
@@ -255,28 +149,50 @@ class TradeBot:
         s = f"{inc:.10f}".rstrip("0").rstrip(".")
         return len(s.split(".")[1]) if "." in s else 0
 
-    # ------------------------------ #
-    # Baseline P&L                  #
-    # ------------------------------ #
+    def _compute_maker_limit(self, product_id: str, side: str, last_price: float) -> Tuple[float, float]:
+        """Return (limit_price, base_size) that should rest as maker, using per-asset bps offset."""
+        offset_bps = getattr(self.cfg, "maker_offset_bps_per_product", {}).get(
+            product_id, float(getattr(self.cfg, "maker_offset_bps", 5.0))
+        )
+        offset = offset_bps / 10_000.0
+        price_inc = self.price_inc.get(product_id, 0.01)
+        base_inc = self.base_inc.get(product_id, 1e-8)
+
+        if side == "BUY":
+            raw_price = last_price * (1.0 - offset)
+            limit_price = self._round_down_to_inc(raw_price, price_inc)
+        else:
+            raw_price = last_price * (1.0 + offset)
+            limit_price = self._round_up_to_inc(raw_price, price_inc)
+
+        base_size = max(0.0, float(getattr(self.cfg, "usd_per_order", 1.0)) / limit_price) if limit_price > 0 else 0.0
+        base_size = self._round_down_to_inc(base_size, base_inc)
+        return limit_price, base_size
+
+    # -------------------- persistence --------------------
+    def _load_portfolio(self):
+        data = load_json(PORTFOLIO_FILE, {"positions": {}, "cost_basis": {}, "realized_pnl": 0.0})
+        for k, v in data.get("positions", {}).items():
+            self.positions[k] = float(v)
+        for k, v in data.get("cost_basis", {}).items():
+            self.cost_basis[k] = float(v)
+        self.realized_pnl = float(data.get("realized_pnl", 0.0))
+
+    def _save_portfolio(self):
+        save_json(
+            PORTFOLIO_FILE,
+            {"positions": self.positions, "cost_basis": self.cost_basis, "realized_pnl": float(self.realized_pnl)},
+        )
+
+    # -------------------- lifecycle --------------------
     def set_run_baseline(self):
+        """Call once after startup reconciliation to start per-run P&L tracking (live realized)."""
         self.run_pnl_baseline = self.realized_pnl
         base_str = f"{self.run_pnl_baseline:.{PNL_DECIMALS}f}"
         logging.info("P&L baseline set for this run: $%s", base_str)
 
-    # ------------------------------ #
-    # Fills reconciliation (live)    #
-    # ------------------------------ #
-    def _fill_fingerprint(self, f: dict) -> str:
-        oid = f.get("order_id", "")
-        tid = f.get("trade_id") or f.get("fill_id") or f.get("sequence") or f.get("trade_time") or ""
-        pid = f.get("product_id", "")
-        sz  = f.get("size") or f.get("base_size") or f.get("filled_size") or ""
-        px  = f.get("price") or ""
-        fee = f.get("fee") or ""
-        side = f.get("side") or f.get("order_side") or ""
-        return f"{oid}|{tid}|{pid}|{sz}|{px}|{fee}|{side}"
-
     def reconcile_recent_fills(self, lookback_hours: int = 48):
+        """Fetch fills from the last N hours, update portfolio from *actual* fills, de-duped."""
         end = datetime.now(timezone.utc)
         start = end - timedelta(hours=lookback_hours)
         params = {
@@ -299,7 +215,7 @@ class TradeBot:
                 continue
 
             side = (f.get("side") or f.get("order_side") or "").upper()
-            pid  = f.get("product_id")
+            pid = f.get("product_id")
             if not pid or side not in {"BUY", "SELL"}:
                 self._processed_fills[fp] = {"skip": True}
                 changed = True
@@ -333,22 +249,20 @@ class TradeBot:
             changed = True
 
         if changed:
-            self._save_fill_index()
+            save_json(PROCESSED_FILLS_FILE, self._processed_fills)
             self._save_portfolio()
             run_delta = self.realized_pnl - (getattr(self, "run_pnl_baseline", self.realized_pnl))
             pnl_str = f"{self.realized_pnl:.{PNL_DECIMALS}f}"
             run_str = f"{run_delta:.{PNL_DECIMALS}f}"
             logging.info("Reconciled fills. Lifetime P&L: $%s | This run: $%s", pnl_str, run_str)
 
-    # ------------------------------ #
-    # Open/Close                     #
-    # ------------------------------ #
     def open(self):
         self.ws.open()
-        self.ws.ticker(product_ids=list(self.cfg.product_ids))
-        logging.info("Subscribed to ticker for %s", ", ".join(self.cfg.product_ids))
+        self.ws.ticker(product_ids=self.product_ids)
+        logging.info("Subscribed to ticker for %s", ", ".join(self.product_ids))
 
     def close(self):
+        # write footer once on clean shutdown if not already written
         if not self.session_footer_written:
             self.log_session_pnl()
             self.session_footer_written = True
@@ -357,9 +271,7 @@ class TradeBot:
         except Exception:
             pass
 
-    # ------------------------------ #
-    # WebSocket handler              #
-    # ------------------------------ #
+    # -------------------- websocket --------------------
     def on_ws_message(self, msg: dict):
         if msg.get("channel") != "ticker" or self.stop_requested:
             return
@@ -368,125 +280,108 @@ class TradeBot:
             for t in ev.get("tickers", []):
                 pid = t.get("product_id")
                 price = t.get("price")
-                if pid not in self.short:
-                    # Safety: initialize on-the-fly if new symbol arrives
-                    se, le, mt = self._get_ema_params(pid)
-                    self.short[pid] = EMA(se)
-                    self.long[pid]  = EMA(le)
-                    self.min_ticks_per_product[pid] = mt
-                    self.ticks[pid] = 0
-                    self.rsi[pid] = RSI(period=14)
-                    self.macd[pid] = MACD(fast=12, slow=26, signal=9)
-
-                if price is None:
+                if pid not in self.short or price is None:
                     continue
-
                 try:
                     p = float(price)
                 except Exception:
                     continue
 
-                # Update EMAs
+                # Update indicators
                 self.ticks[pid] += 1
                 s = self.short[pid].update(p)
                 l = self.long[pid].update(p)
 
-                # Update advisors
-                rsi_val = self.rsi[pid].update(p)
-                macd_line, macd_signal, macd_hist = self.macd[pid].update(p)
+                if self.enable_advisors:
+                    # MACD + RSI updated as well
+                    self._macd[pid].update(p)
+                    self._rsi[pid].update(p)
 
-                min_needed = self.min_ticks_per_product.get(pid, self.cfg.min_ticks)
+                min_needed = self.min_ticks_per_product.get(pid, int(getattr(self.cfg, "min_ticks", 60)))
                 if self.ticks[pid] >= min_needed and s is not None and l is not None:
-                    self.evaluate_signal(pid, p, s, l, rsi_val, macd_hist)
+                    self.evaluate_signal(pid, p, s, l)
 
-    # ------------------------------ #
-    # Signal + Advisor gating        #
-    # ------------------------------ #
-    def evaluate_signal(self, product_id: str, price: float, s: float, l: float,
-                        rsi_val: Optional[float], macd_hist: Optional[float]):
+    # -------------------- signal & orders --------------------
+    def evaluate_signal(self, product_id: str, price: float, s: float, l: float):
         if self.stop_requested:
             return
 
-        # EMA captain
         signal = 1 if s > l else -1
-
-        # Cooldown
-        if not self.last.ok(product_id, self.cfg.cooldown_sec):
+        if not self.last.ok(product_id, int(getattr(self.cfg, "cooldown_sec", 300))):
             return
 
-        # SELL guardrails
-        if signal < 0:
-            if self.positions[product_id] <= 0.0:
-                logging.info("Skip SELL %s: no position held.", product_id)
-                return
-            cb = self.cost_basis[product_id]
-            if cb > 0.0 and price <= cb:
-                logging.info("Skip SELL %s: price %.6f <= cost basis %.6f.", product_id, price, cb)
-                return
+        # SELL guardrails: must hold position
+        if signal < 0 and self.positions[product_id] <= 0.0:
+            logging.info("Skip SELL %s: no position held.", product_id)
+            return
 
-        # Advisors (only if we have values)
-        if rsi_val is not None and macd_hist is not None:
+        # Cost-basis & stop-loss tolerance for SELLs
+        if signal < 0:
+            cb = self.cost_basis[product_id]
+            if cb > 0.0:
+                # Stop-loss tolerance floor
+                if self.max_loss_bps is not None:
+                    tol = float(self.max_loss_bps) / 10_000.0
+                    floor = cb * (1.0 - tol)
+                    if price < floor:
+                        logging.info(
+                            "Skip SELL %s: price %.6f < stop-loss floor %.6f (cb %.6f, tol %.2f bps).",
+                            product_id, price, floor, cb, float(self.max_loss_bps),
+                        )
+                        return
+                # If no tolerance set, fall back to strict “above cost”
+                elif price <= cb:
+                    logging.info("Skip SELL %s: price %.6f <= cost basis %.6f.", product_id, price, cb)
+                    return
+
+        # Advisors (optional)
+        if self.enable_advisors:
+            rsi_val = self._rsi[product_id].value
+            macd_hist = self._macd[product_id].hist
             if signal > 0:
-                # BUY veto: RSI too hot or MACD momentum not supportive
-                if rsi_val >= RSI_OVERBOUGHT or macd_hist <= 0:
-                    logging.info("Advisor veto BUY %s (RSI=%.2f, MACD_hist=%.4f)", product_id, rsi_val, macd_hist)
+                # BUY: avoid if RSI too hot OR MACD hist <= 0
+                if (rsi_val is not None and rsi_val >= self.rsi_sell_ceiling) or (macd_hist is not None and macd_hist <= 0):
+                    logging.info(
+                        "Advisor veto BUY %s (RSI=%.2f, MACD_hist=%.4f)",
+                        product_id, rsi_val if rsi_val is not None else float("nan"),
+                        macd_hist if macd_hist is not None else float("nan"),
+                    )
                     return
             else:
-                # SELL veto: RSI too cold or MACD momentum not supportive
-                if rsi_val <= RSI_OVERSOLD or macd_hist >= 0:
-                    logging.info("Advisor veto SELL %s (RSI=%.2f, MACD_hist=%.4f)", product_id, rsi_val, macd_hist)
+                # SELL: avoid if RSI too low OR MACD hist >= 0
+                if (rsi_val is not None and rsi_val <= self.rsi_buy_floor) or (macd_hist is not None and macd_hist >= 0):
+                    logging.info(
+                        "Advisor veto SELL %s (RSI=%.2f, MACD_hist=%.4f)",
+                        product_id, rsi_val if rsi_val is not None else float("nan"),
+                        macd_hist if macd_hist is not None else float("nan"),
+                    )
                     return
 
         # Daily cap
         spent_today = self.spend.today_total()
-        remaining = max(0.0, self.cfg.max_usd_per_day - spent_today)
+        remaining = max(0.0, float(getattr(self.cfg, "max_usd_per_day", 10.0)) - spent_today)
         if remaining <= 0:
             if not self.daily_cap_reached_logged:
-                logging.info("Daily cap reached (%.2f). Skipping trades.", self.cfg.max_usd_per_day)
+                logging.info("Daily cap reached (%.2f). Skipping trades.", float(getattr(self.cfg, "max_usd_per_day", 10.0)))
                 self.log_session_pnl()
                 self.daily_cap_reached_logged = True
                 self.session_footer_written = True
                 self.stop_requested = True
             return
 
-        notional = min(self.cfg.usd_per_order, remaining)
+        notional = min(float(getattr(self.cfg, "usd_per_order", 1.0)), remaining)
         try:
-            if signal > 0:
-                self.place_order(product_id, side="BUY",  quote_usd=notional, last_price=price)
-            else:
-                self.place_order(product_id, side="SELL", quote_usd=notional, last_price=price)
+            side = "BUY" if signal > 0 else "SELL"
+            self.place_order(product_id, side=side, quote_usd=notional, last_price=price)
         except Exception as e:
             logging.exception("Order error for %s: %s", product_id, e)
 
-    # ------------------------------ #
-    # Maker limit computation        #
-    # ------------------------------ #
-    def _compute_maker_limit(self, product_id: str, side: str, last_price: float) -> Tuple[float, float]:
-        offset_bps = self.cfg.maker_offset_bps_per_product.get(product_id, self.cfg.maker_offset_bps)
-        offset = offset_bps / 10000.0
-        price_inc = self.price_inc.get(product_id, 0.01)
-        base_inc  = self.base_inc.get(product_id, 1e-8)
-
-        if side == "BUY":
-            raw_price = last_price * (1.0 - offset)
-            limit_price = self._round_down_to_inc(raw_price, price_inc)
-        else:
-            raw_price = last_price * (1.0 + offset)
-            limit_price = self._round_up_to_inc(raw_price, price_inc)
-
-        base_size = max(0.0, self.cfg.usd_per_order / limit_price) if limit_price > 0 else 0.0
-        base_size = self._round_down_to_inc(base_size, base_inc)
-        return (limit_price, base_size)
-
-    # ------------------------------ #
-    # Order submission               #
-    # ------------------------------ #
     def _submit_limit_maker_order(self, product_id: str, side: str, base_size: float, limit_price: float):
         client_order_id = f"ema-{product_id}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         p_dec = self._decimals_from_inc(self.price_inc.get(product_id, 0.01))
         b_dec = self._decimals_from_inc(self.base_inc.get(product_id, 1e-8))
         limit_price_str = f"{limit_price:.{p_dec}f}"
-        base_size_str   = f"{base_size:.{b_dec}f}"
+        base_size_str = f"{base_size:.{b_dec}f}"
 
         params = {
             "client_order_id": client_order_id,
@@ -495,8 +390,8 @@ class TradeBot:
             "base_size": base_size_str,
             "post_only": True,
         }
-        if self.cfg.portfolio_id:
-            params["portfolio_id"] = self.cfg.portfolio_id
+        if self.portfolio_id:
+            params["portfolio_id"] = self.portfolio_id
 
         try:
             if side == "BUY":
@@ -510,8 +405,8 @@ class TradeBot:
     def _submit_market_order(self, product_id: str, side: str, quote_usd: float):
         client_order_id = f"ema-{product_id}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
         params = {"client_order_id": client_order_id, "product_id": product_id, "quote_size": f"{quote_usd:.2f}"}
-        if self.cfg.portfolio_id:
-            params["portfolio_id"] = self.cfg.portfolio_id
+        if self.portfolio_id:
+            params["portfolio_id"] = self.portfolio_id
         try:
             if side == "BUY":
                 resp = self.rest.market_order_buy(**params)
@@ -527,10 +422,11 @@ class TradeBot:
 
         # Local log (informational)
         display_qty = quote_usd / last_price if last_price > 0 else 0.0
-        log_trade(product_id, side, quote_usd, last_price, display_qty, self.cfg.dry_run)
+        dry_run = bool(getattr(self.cfg, "dry_run", False))
+        log_trade(product_id, side, quote_usd, last_price, display_qty, dry_run)
 
-        # DRY RUN
-        if self.cfg.dry_run:
+        # DRY RUN: update session cash P&L and cap/cooldown
+        if dry_run:
             if side == "BUY":
                 self.session_cash_pnl -= quote_usd
             else:
@@ -540,12 +436,14 @@ class TradeBot:
             logging.info("[DRY RUN] %s %s $%.2f", side, product_id, quote_usd)
             return
 
-        # LIVE
-        if self.cfg.prefer_maker:
+        # LIVE: place order
+        prefer_maker = bool(getattr(self.cfg, "prefer_maker", True))
+        if prefer_maker:
             limit_price, base_size = self._compute_maker_limit(product_id, side, last_price)
             if base_size <= 0 or limit_price <= 0:
-                logging.error("Invalid maker params for %s %s: price=%.8f size=%.8f",
-                              side, product_id, limit_price, base_size)
+                logging.error(
+                    "Invalid maker params for %s %s: price=%.8f size=%.8f", side, product_id, limit_price, base_size
+                )
                 return
             ok, resp = self._submit_limit_maker_order(product_id, side, base_size, limit_price)
         else:
@@ -555,18 +453,18 @@ class TradeBot:
             logging.error("%s order FAILED for %s $%.2f: %s", side, product_id, quote_usd, resp)
             return
 
-        # Count toward cap & cooldown on submission
+        # Count toward cap and cooldown on submission
         self.spend.add(quote_usd)
         self.last.stamp(product_id)
 
-        # Log response
+        # Log response body
         try:
             body = getattr(resp, "to_dict", lambda: resp)()
             logging.info("Live %s %s $%.2f placed. Resp: %s", side, product_id, quote_usd, body)
         except Exception:
             logging.info("Live %s %s $%.2f placed.", side, product_id, quote_usd)
 
-        # Try to fetch fills immediately (best-effort)
+        # Best-effort: fetch fills for this order to update portfolio & realized P&L
         try:
             body = getattr(resp, "to_dict", lambda: resp)()
             order_id = (body.get("success_response", {}).get("order_id") or body.get("order_id"))
@@ -584,7 +482,7 @@ class TradeBot:
                     if fp in self._processed_fills:
                         continue
                     side_f = (f.get("side") or f.get("order_side") or "").upper()
-                    pid_f  = f.get("product_id")
+                    pid_f = f.get("product_id")
                     size_f = float(f.get("size") or f.get("base_size") or f.get("filled_size") or 0.0)
                     price_f = float(f.get("price") or 0.0)
                     fee_f = float(f.get("fee") or 0.0)
@@ -612,7 +510,7 @@ class TradeBot:
                         liq_flags.add(flag)
 
                 if any_new:
-                    self._save_fill_index()
+                    save_json(PROCESSED_FILLS_FILE, self._processed_fills)
                     self._save_portfolio()
                     run_delta = self.realized_pnl - self.run_pnl_baseline
                     pnl_str = f"{self.realized_pnl:.{PNL_DECIMALS}f}"
@@ -624,9 +522,17 @@ class TradeBot:
         except Exception as e:
             logging.debug("Could not fetch immediate fills: %s", e)
 
-    # ------------------------------ #
-    # Footer                         #
-    # ------------------------------ #
+    # -------------------- misc --------------------
+    def _fill_fingerprint(self, f: dict) -> str:
+        oid = f.get("order_id", "")
+        tid = f.get("trade_id") or f.get("fill_id") or f.get("sequence") or f.get("trade_time") or ""
+        pid = f.get("product_id", "")
+        sz = f.get("size") or f.get("base_size") or f.get("filled_size") or ""
+        px = f.get("price") or ""
+        fee = f.get("fee") or ""
+        side = f.get("side") or f.get("order_side") or ""
+        return f"{oid}|{tid}|{pid}|{sz}|{px}|{fee}|{side}"
+
     def log_session_pnl(self):
         """Append P&L and runtime duration at end of session."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -635,7 +541,7 @@ class TradeBot:
         life_str = f"{self.realized_pnl:.{PNL_DECIMALS}f}"
         run_str = f"{run_total:.{PNL_DECIMALS}f}"
 
-        sep = "-" * 117 + "\n"
+        sep = "-" * 110 + "\n"
         duration = datetime.now(timezone.utc) - self.session_start
 
         with open(TRADE_LOG_FILE, "a") as f:
