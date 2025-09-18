@@ -1,3 +1,4 @@
+
 # bot/tradebot.py
 import json
 import logging
@@ -9,6 +10,55 @@ from typing import Dict, Optional, Tuple
 
 from coinbase.rest import RESTClient
 from coinbase.websocket import WSClient
+
+# --- Candle helpers ---
+class CandleBuilder:
+    """Simple per-product OHLCV builder for fixed-second buckets from ticker events."""
+    def __init__(self, bucket_sec: int):
+        self.bucket = int(bucket_sec)
+        self.start = None  # epoch seconds (bucket start)
+        self.o = self.h = self.l = self.c = None
+        self.v = 0.0
+
+    def _bucket_start(self, ts: float) -> int:
+        return int(ts // self.bucket) * self.bucket
+
+    def update(self, price: float, ts: float):
+        bs = self._bucket_start(ts)
+        p = float(price)
+        if self.start is None:
+            self.start = bs
+            self.o = self.h = self.l = self.c = p
+            self.v = 0.0
+            return None
+        if bs == self.start:
+            # inside same candle
+            self.h = p if (self.h is None or p > self.h) else self.h
+            self.l = p if (self.l is None or p < self.l) else self.l
+            self.c = p
+            return None
+        # bucket rolled -> close previous, start new
+        closed = (self.start, self.o, self.h, self.l, self.c, self.v)
+        self.start = bs
+        self.o = self.h = self.l = self.c = p
+        self.v = 0.0
+        return closed  # (start, open, high, low, close, volume)
+
+def _parse_ws_iso(ts: str | None) -> float:
+    """Parse ISO8601 '...Z' string to epoch seconds; fallback to time.time()."""
+    if not ts:
+        return time.time()
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return time.time()
+
+def _granularity_enum(gran_sec: int) -> str:
+    mapping = {
+        60: "ONE_MINUTE", 300: "FIVE_MINUTE", 900: "FIFTEEN_MINUTE", 1800: "THIRTY_MINUTE",
+        3600: "ONE_HOUR", 7200: "TWO_HOUR", 14400: "FOUR_HOUR", 21600: "SIX_HOUR", 86400: "ONE_DAY",
+    }
+    return mapping.get(int(gran_sec), "FIVE_MINUTE")
 
 from .utils import (
     PNL_DECIMALS,
@@ -54,7 +104,7 @@ class TradeBot:
         # Indicators and per-product params
         self.short: Dict[str, EMA] = {}
         self.long: Dict[str, EMA] = {}
-        self.ticks: Dict[str, int] = defaultdict(int)
+        self.ticks: Dict[str, int] = defaultdict(int)  # counts candles in candle mode
         self.min_ticks_per_product: Dict[str, int] = {}
         self._trend = defaultdict(int)   # -1 below, 0 band, +1 above
         self._primed = set()             # first crossover primes only (no trade)
@@ -71,13 +121,19 @@ class TradeBot:
             )
             for p in self.product_ids
         }
+
+        # confirmation need (candles), with backward-compatible fallback to confirm_ticks
+        self._confirm_need = max(1, int(getattr(self.cfg, "confirm_candles",
+                                 getattr(self.cfg, "confirm_ticks", 2))))
+
+        # One-sided RSI veto: buys require rsi <= rsi_buy_max; sells require rsi >= rsi_sell_min
         self.advisor_settings = AdvisorSettings(
             enable_rsi=self.enable_advisors,
             rsi_period=int(getattr(self.cfg, "rsi_period", 14)),
-            rsi_buy_min=float(getattr(self.cfg, "rsi_buy_floor", 30.0)),
-            rsi_buy_max=float(getattr(self.cfg, "rsi_sell_ceiling", 70.0)),
-            rsi_sell_min=float(getattr(self.cfg, "rsi_buy_floor", 30.0)),
-            rsi_sell_max=float(getattr(self.cfg, "rsi_sell_ceiling", 70.0)),
+            rsi_buy_min=0.0,  # unused by current veto
+            rsi_buy_max=float(getattr(self.cfg, "rsi_buy_max", getattr(self.cfg, "rsi_sell_ceiling", 70.0))),
+            rsi_sell_min=float(getattr(self.cfg, "rsi_sell_min", getattr(self.cfg, "rsi_buy_floor", 30.0))),
+            rsi_sell_max=100.0,  # unused by current veto
             enable_macd=self.enable_advisors,
             macd_fast=int(getattr(self.cfg, "macd_fast", 12)),
             macd_slow=int(getattr(self.cfg, "macd_slow", 26)),
@@ -86,18 +142,29 @@ class TradeBot:
             macd_buy_min=float(getattr(self.cfg, "macd_buy_min", 0.0)),
             macd_sell_max=float(getattr(self.cfg, "macd_sell_max", 0.0)),
         )
-        
+
         logging.info(
-            "Advisors: RSI %.1f–%.1f (period=%d) | MACD %d/%d/%d, thresholds buy>=%.2f bps sell<=%.2f bps | deadband=%.2f bps | confirm=%d",
-            self.advisor_settings.rsi_buy_min, self.advisor_settings.rsi_buy_max, self.advisor_settings.rsi_period,
+            "Advisors: RSI buy<=%.1f / sell>=%-.1f (period=%d) | MACD %d/%d/%d, thresholds buy>=%.2f bps sell<=%.2f bps | deadband=%.2f bps | confirm=%d",
+            self.advisor_settings.rsi_buy_max, self.advisor_settings.rsi_sell_min, self.advisor_settings.rsi_period,
             self.advisor_settings.macd_fast, self.advisor_settings.macd_slow, self.advisor_settings.macd_signal,
             self.advisor_settings.macd_buy_min, self.advisor_settings.macd_sell_max,
             float(getattr(self.cfg, "ema_deadband_bps", 0.0)),
-            int(getattr(self.cfg, "confirm_ticks", 1)),
+            self._confirm_need,
         )
 
+        # -------- Candle config / state --------
+        # Back-compat: prefer new names, fall back to old
+        self.candle_mode = str(getattr(self.cfg, "mode", getattr(self.cfg, "candle_mode", "ws"))).lower()
+        # map candle_interval -> seconds if provided, else read granularity_sec
+        ci = str(getattr(self.cfg, "candle_interval", "")).lower().strip()
+        _ci2sec = {"1m":60,"5m":300,"15m":900,"30m":1800,"1h":3600,"2h":7200,"4h":14400,"6h":21600,"1d":86400}
+        self.granularity_sec = int(_ci2sec.get(ci, int(getattr(self.cfg, "granularity_sec", 300))))
 
-        # EMA objects and per-product minimum ticks
+        self._last_candle_start: Dict[str, int | None] = {p: None for p in self.product_ids}
+        self._cur_candle_close: Dict[str, float | None] = {p: None for p in self.product_ids}
+        self._builders: Dict[str, CandleBuilder] = {p: CandleBuilder(self.granularity_sec) for p in self.product_ids}
+
+        # EMA objects and per-product minimum candles
         for p in self.product_ids:
             se, le, mt = self._get_ema_params(p)
             self.short[p] = EMA(se)
@@ -137,12 +204,19 @@ class TradeBot:
         self._load_portfolio()
         self._processed_fills = load_json(PROCESSED_FILLS_FILE, {})
 
+        # Optional: backfill indicators from REST candles to warm up
+        if bool(getattr(self.cfg, "use_backfill", True)):
+            try:
+                self._backfill_seed_indicators()
+            except Exception as e:
+                logging.debug("Backfill seeding failed: %s", e)
+
     # -------------------- helpers & config --------------------
     def _get_ema_params(self, pid: str) -> Tuple[int, int, int]:
         ovr = getattr(self.cfg, "ema_params_per_product", {}).get(pid, {})
         se = int(ovr.get("short_ema", getattr(self.cfg, "short_ema", 20)))
         le = int(ovr.get("long_ema", getattr(self.cfg, "long_ema", 50)))
-        mt = int(ovr.get("min_ticks", getattr(self.cfg, "min_ticks", 60)))
+        mt = int(ovr.get("min_candles", getattr(self.cfg, "min_candles", getattr(self.cfg, "min_ticks", 60))))
         return se, le, mt
 
     def _prime_increments(self):
@@ -179,14 +253,54 @@ class TradeBot:
         base_str = f"{self.run_pnl_baseline:.{PNL_DECIMALS}f}"
         logging.info("P&L baseline set for this run: $%s", base_str)
 
+    def _backfill_seed_indicators(self):
+        lookback = int(getattr(self.cfg, "warmup_candles", 200))
+        enum = _granularity_enum(self.granularity_sec)
+        end_ts = int(time.time())
+        start_ts = end_ts - (lookback + 5) * self.granularity_sec
+        for pid in self.product_ids:
+            try:
+                resp = self.rest.get_candles(product_id=pid, start=str(start_ts), end=str(end_ts), granularity=enum)
+                body = getattr(resp, "to_dict", lambda: resp)()
+                arr = list(body.get("candles", []))
+                arr.sort(key=lambda c: int(c.get("start", 0)))
+                for c in arr:
+                    close = float(c.get("close"))
+                    self.short[pid].update(close)
+                    self.long[pid].update(close)
+                    if self.enable_advisors:
+                        self._macd[pid].update(close)
+                        self._rsi[pid].update(close)
+                    self.ticks[pid] += 1
+                if arr:
+                    last = arr[-1]
+                    self._last_candle_start[pid] = int(last.get("start"))
+                    self._cur_candle_close[pid] = float(last.get("close"))
+                logging.info("Backfilled %s with %d candles (%s)", pid, len(arr), enum)
+            except Exception as e:
+                logging.debug("Backfill failed for %s: %s", pid, e)
+
     def open(self):
         self.ws.open()
+        # Always keep ticker for quotes/maker logic
         self.ws.ticker(product_ids=self.product_ids)
+        # Candles if requested via WS; otherwise we will locally aggregate from ticker
+        if self.candle_mode == "ws":
+            try:
+                enum = _granularity_enum(self.granularity_sec)
+                try:
+                    self.ws.candles(product_ids=self.product_ids, granularity=enum)
+                except TypeError:
+                    self.ws.candles(product_ids=self.product_ids)
+                logging.info("Subscribed to WS candles (%ds) and ticker for %s", self.granularity_sec, ", ".join(self.product_ids))
+            except Exception:
+                logging.info("WS candles unavailable; falling back to local aggregation.")
+                self.candle_mode = "local"
         try:
             self.ws.heartbeats()
         except Exception:
             logging.debug("Heartbeats channel not available; continuing without it.")
-        logging.info("Subscribed to ticker for %s", ", ".join(self.product_ids))
+        logging.info("Websocket subscriptions ready.")
 
     def run_ws_forever(self):
         """
@@ -282,44 +396,61 @@ class TradeBot:
     # -------------------- websocket --------------------
     def on_ws_message(self, msg: dict):
         self._last_msg_ts = time.time()
-        if msg.get("channel") != "ticker" or self.stop_requested:
+        if self.stop_requested:
             return
-        events = msg.get("events") or []
-        for ev in events:
-            for t in ev.get("tickers", []):
-                pid = t.get("product_id")
-                price = t.get("price")
-                if pid not in self.short or price is None:
-                    continue
-                try:
-                    p = float(price)
-                except Exception:
-                    continue
+        ch = msg.get("channel")
+        if ch == "ticker":
+            events = msg.get("events") or []
+            ts_now = _parse_ws_iso(msg.get("timestamp"))
+            for ev in events:
+                for t in ev.get("tickers", []):
+                    pid = t.get("product_id")
+                    price = t.get("price")
+                    if pid not in self.short or price is None:
+                        continue
+                    try:
+                        p = float(price)
+                    except Exception:
+                        continue
+                    # cache quotes if present
+                    bid_raw = t.get("best_bid") or t.get("bid")
+                    ask_raw = t.get("best_ask") or t.get("ask")
+                    try:
+                        if bid_raw is not None:
+                            self.quotes[pid]["bid"] = float(bid_raw)
+                        if ask_raw is not None:
+                            self.quotes[pid]["ask"] = float(ask_raw)
+                    except Exception:
+                        pass
+                    self.quotes[pid]["last"] = p
+                    # local candle aggregation
+                    if self.candle_mode == "local":
+                        closed = self._builders[pid].update(p, ts_now)
+                        if closed is not None:
+                            start, o, h, l, c, v = closed
+                            self._on_candle_close(pid, start, c)
 
-                # cache quotes if present
-                bid_raw = t.get("best_bid") or t.get("bid")
-                ask_raw = t.get("best_ask") or t.get("ask")
-                try:
-                    if bid_raw is not None:
-                        self.quotes[pid]["bid"] = float(bid_raw)
-                    if ask_raw is not None:
-                        self.quotes[pid]["ask"] = float(ask_raw)
-                except Exception:
-                    pass
-                self.quotes[pid]["last"] = p
-
-                # Update indicators
-                self.ticks[pid] += 1
-                s = self.short[pid].update(p)
-                l = self.long[pid].update(p)
-
-                if self.enable_advisors:
-                    self._macd[pid].update(p)
-                    self._rsi[pid].update(p)
-
-                min_needed = self.min_ticks_per_product.get(pid, int(getattr(self.cfg, "min_ticks", 60)))
-                if self.ticks[pid] >= min_needed and s is not None and l is not None:
-                    self.evaluate_signal(pid, p, s, l)
+        elif ch == "candles":
+            events = msg.get("events") or []
+            for ev in events:
+                for c in ev.get("candles", []):
+                    pid = c.get("product_id")
+                    if pid not in self.short:
+                        continue
+                    try:
+                        start = int(c.get("start"))
+                        close = float(c.get("close"))
+                    except Exception:
+                        continue
+                    last_start = self._last_candle_start.get(pid)
+                    if last_start is None:
+                        self._last_candle_start[pid] = start
+                        self._cur_candle_close[pid] = close
+                        continue
+                    if start != last_start:
+                        self._on_candle_close(pid, last_start, self._cur_candle_close.get(pid, close))
+                        self._last_candle_start[pid] = start
+                    self._cur_candle_close[pid] = close
 
     # -------------------- signal & orders --------------------
     def evaluate_signal(self, product_id: str, price: float, s: float, l: float):
@@ -354,7 +485,7 @@ class TradeBot:
             st = {"rel": rel, "count": 1}
         self._pending[product_id] = st
 
-        need = int(getattr(self.cfg, "confirm_ticks", 2))
+        need = max(1, int(getattr(self, "_confirm_need", 1)))
         if st["count"] < max(1, need):
             return
 
@@ -365,7 +496,8 @@ class TradeBot:
         self._trend[product_id] = rel
         signal = rel  # +1 buy, -1 sell
 
-        if not self.last.ok(product_id, int(getattr(self.cfg, "cooldown_sec", 300))):
+        cooldown_s = int(getattr(self.cfg, "per_product_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
+        if not self.last.ok(product_id, cooldown_s):
             return
 
         # SELL guardrails: must hold position
@@ -405,11 +537,12 @@ class TradeBot:
 
         # BUY-only daily cap
         spent_today = self.spend.today_total()
-        remaining = max(0.0, float(getattr(self.cfg, "max_usd_per_day", 10.0)) - spent_today)
+        daily_cap = float(getattr(self.cfg, "daily_spend_cap_usd", getattr(self.cfg, "max_usd_per_day", 10.0)))
+        remaining = max(0.0, daily_cap - spent_today)
         side = "BUY" if signal > 0 else "SELL"
         if side == "BUY" and remaining <= 0:
             if not self.daily_cap_reached_logged:
-                logging.info("Daily BUY cap reached (%.2f). Skipping further BUYs.", float(getattr(self.cfg, "max_usd_per_day", 10.0)))
+                logging.info("Daily BUY cap reached (%.2f). Skipping further BUYs.", daily_cap)
                 self.log_session_pnl()
                 self.daily_cap_reached_logged = True
                 self.session_footer_written = True
@@ -787,3 +920,15 @@ class TradeBot:
             pnl_str = f"{self.realized_pnl:.{PNL_DECIMALS}f}"
             run_str = f"{run_delta:.{PNL_DECIMALS}f}"
             logging.info("Reconciled fills. Lifetime P&L: $%s | This run: $%s", pnl_str, run_str)
+
+    def _on_candle_close(self, product_id: str, start_sec: int, close_price: float):
+        # Update indicators once per closed candle
+        s = self.short[product_id].update(close_price)
+        l = self.long[product_id].update(close_price)
+        if self.enable_advisors:
+            self._macd[product_id].update(close_price)
+            self._rsi[product_id].update(close_price)
+        self.ticks[product_id] += 1  # now counts candles
+        min_needed = self.min_ticks_per_product.get(product_id, int(getattr(self.cfg, "min_candles", getattr(self.cfg, "min_ticks", 60))))
+        if self.ticks[product_id] >= min_needed and s is not None and l is not None:
+            self.evaluate_signal(product_id, close_price, s, l)
