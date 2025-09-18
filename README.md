@@ -1,14 +1,41 @@
-# EMA TradeBot (beta)
+# Tradebot v1.0
 
-A minimal crypto **EMA crossover trade bot** that listens to Coinbase Advanced WebSocket tickers and places trades via the REST API. EMA is the **captain**; RSI and MACD act as **advisors** that can veto bad entries/exits. State (P&L, fills processed, daily spend) is tracked locally under `.state/`.
+🚀 **First stable release (no longer beta)**
 
-## Features (beta)
-- Streaming **EMA crossover** signals on multiple products (per-asset EMA overrides supported).
-- **Advisor vetoes:** RSI (overbought/oversold) and MACD histogram momentum.
-- **Maker-prefer** limit orders (post-only) with per-asset basis-point offsets, or market orders.
-- **Daily spend cap** and **cooldown** per product.
-- **Dry-run mode** (default) that logs trades without sending orders.
-- **Fills reconciliation** on startup to keep local P&L in sync.
-- **Session footer** logs P&L and runtime to `.state/trade_log.txt`.
+Tradebot is an automated crypto trading bot for **Coinbase Advanced**.  
+It uses an **EMA crossover** strategy with **RSI/MACD advisors**, plus risk controls like daily caps, cooldowns, and optional stop-loss tolerance.
 
-## Repo layout
+---
+
+## 📄 Documentation
+- **Full User Guide (PDF):** [docs/README.pdf](docs/README.pdf)
+- More docs:
+  - [USAGE.md](USAGE.md)
+  - [CONTRIBUTING.md](CONTRIBUTING.md)
+  - [CHANGELOG.md](CHANGELOG.md)
+
+---
+
+## ✨ v1.0 Highlights
+- Out of beta — **first stable release**
+- EMA crossover with **dead-band** to reduce flapping
+- RSI & MACD **advisors** to veto risky entries/exits
+- **Maker-prefer** orders with per-asset bps offsets
+- **Risk controls:** daily spend cap, cooldowns, stop-loss tolerance
+- Session P&L baselines and runtime footer logging
+
+---
+
+## 🔐 Secrets
+Copy `APIkeys.env.example` → `APIkeys.env` and fill your Coinbase credentials.  
+`APIkeys.env` is **.gitignored** — never commit real keys.
+
+---
+
+## 🛠️ Quickstart
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+copy APIkeys.env.example APIkeys.env   # fill your keys
+python .\main.py
