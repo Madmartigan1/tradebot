@@ -12,7 +12,7 @@ class BotConfig:
         "DOT-USD","ARB-USD",
     ])
 
-    # -------- Candles v1.0.1 --------
+    # -------- Candles v1.0.2 --------
     mode: str = "ws"                   # or "local" if you want local aggregation, ws is fine by default.
     candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
     min_candles: int = 120             # wait for indicator warm-up
@@ -39,7 +39,7 @@ class BotConfig:
     # Ops / Risk
     dry_run: bool = False
     usd_per_order: float = 20.0
-    daily_spend_cap_usd: float = 120.0  # buys stop after cap; sells continue
+    daily_spend_cap_usd: float = 160.0  # buys stop after cap; sells continue
     per_product_cooldown_s: int = 900
     hard_stop_bps: Optional[int] = 120  # emergency stop loss if asset drops below 1.2%
 
@@ -47,11 +47,31 @@ class BotConfig:
     prefer_maker: bool = True
     prefer_maker_for_sells: bool = False
     maker_offset_bps: float = 5.0
-    
+
     maker_offset_bps_per_product: Dict[str, float] = field(default_factory=lambda: {
-        "ETH-USD":18.0,"XRP-USD":22.0,"ADA-USD":24.0,"ATOM-USD":26.0,"ALGO-USD":22.0, "FIL-USD":28.0,
-        "XLM-USD":24.0,"HBAR-USD":20.0,"NEAR-USD":22.0,"SOL-USD":20.0,"DOGE-USD":24.0,"AVAX-USD":20.0,
-        "LINK-USD":20.0,"SUI-USD":22.0,"LTC-USD":22.0,"CRO-USD":26.0,"DOT-USD":18.0,"ARB-USD":22.0,
+        "ETH-USD":18.0,"XRP-USD":22.0,"ADA-USD":22.0,"ATOM-USD":26.0,"ALGO-USD":22.0, "FIL-USD":26.0,
+        "XLM-USD":22.0,"HBAR-USD":20.0,"NEAR-USD":20.0,"SOL-USD":20.0,"DOGE-USD":20.0,"AVAX-USD":20.0,
+        "LINK-USD":20.0,"SUI-USD":22.0,"LTC-USD":22.0,"CRO-USD":22.0,"DOT-USD":18.0,"ARB-USD":22.0,
+    })
+
+    # ---- Fill-speed / TTF targets + repricing (helpers) ----
+    # Use these with your main loop:
+    # On each candle close, if an order is still unfilled and the signal is valid,
+    # reprice it (cancel & repost) up to max_reprices_per_signal times.
+    reprice_each_candle: bool = True               # reconsider resting makers every candle
+    reprice_if_unfilled_candles: int = 1           # reprice if still unfilled after this many candles
+    max_reprices_per_signal: int = 2               # don't spam cancels forever
+    reprice_jitter_ms: int = 1500                  # small random delay to avoid all-at-once cancels
+
+    # Per-asset time-to-fill targets, in candles (matches 5m global candles)
+    # Tier A (aim ≤1), Tier B (≤2), Tier C (≤3)
+    ttf_target_candles_per_product: Dict[str, int] = field(default_factory=lambda: {
+        # Tier A
+        "ETH-USD":1, "SOL-USD":1, "LINK-USD":1, "LTC-USD":1, "XRP-USD":1, "DOGE-USD":1,
+        # Tier B
+        "ADA-USD":2, "AVAX-USD":2, "DOT-USD":2, "ARB-USD":2, "FIL-USD":2, "NEAR-USD":2, "ATOM-USD":2,
+        # Tier C
+        "ALGO-USD":3, "XLM-USD":3, "HBAR-USD":3, "CRO-USD":3, "SUI-USD":3,
     })
 
     # Disable per-coin EMA overrides for “global” behavior
