@@ -5,22 +5,30 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 ## [v1.0.1] - 2025-09-18
 ### Added
-- **Candle-based trading mode**: 5-minute candles by default, with optional WS candles or **local aggregation** from ticker; warm-up/backfill and `confirm_candles=3`. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
-- **KPI CSV logging** to `.state/trades.csv` (slippage, fees, liquidity, hold time, etc.). :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
-- **Advisors refactor**: `strategy.py` introduces normalized **MACD in bps** + one-sided **RSI veto** (BUY blocked if overbought, SELL blocked if oversold). :contentReference[oaicite:4]{index=4}
+- **KPI CSV logging** to `.state/trades.csv` (slippage, fees, liquidity, hold time, etc.).
+- **Advisors refactor**: `strategy.py` introduces normalized **MACD in bps** + one-sided **RSI veto**
+  (BUY blocked if overbought, SELL blocked if oversold).
 
 ### Changed
-- **Defaults tightened & risk controls**: `dry_run=False`, `usd_per_order=20`, `daily_spend_cap_usd=120`, `per_product_cooldown_s=900`, `hard_stop_bps=120`. :contentReference[oaicite:5]{index=5}
-- **EMA config**: global `short_ema=40 / long_ema=120`, `min_candles=120`, backfill `warmup_candles=200`; per-product overrides disabled. :contentReference[oaicite:6]{index=6}
-- **Maker logic**: optional `prefer_maker_for_sells`; limit pricing uses exchange increments and clamps SELL size to held position; consistent formatting with `decimals_from_inc`. :contentReference[oaicite:7]{index=7} :contentReference[oaicite:8]{index=8} :contentReference[oaicite:9]{index=9} :contentReference[oaicite:10]{index=10}
-- **Products**: updated list (e.g., **FIL-USD**, **DOT-USD**, **ARB-USD** added). :contentReference[oaicite:11]{index=11}
+- **Defaults tightened & risk controls**:
+  - `dry_run=False`
+  - `usd_per_order=20`
+  - `daily_spend_cap_usd=120`
+  - `per_product_cooldown_s=900`
+  - `hard_stop_bps=120`
+- **EMA config**: global `short_ema=40 / long_ema=120`; `min_ticks=120`; backfill warm-up of 200 ticks;
+  per-product overrides disabled.
+- **Maker logic**: optional `prefer_maker_for_sells`; limit pricing uses exchange increments and clamps
+  SELL size to held position; consistent formatting with `decimals_from_inc`.
+- **Products**: updated list (e.g., **FIL-USD**, **DOT-USD**, **ARB-USD** added).
 
 ### Improved
-- **Fills reconciliation**: on startup and immediately after orders; positions/P&L updated with **fees** and **liquidity flags**; processed-fills pruning. :contentReference[oaicite:12]{index=12} :contentReference[oaicite:13]{index=13} :contentReference[oaicite:14]{index=14}
+- **Fills reconciliation**: on startup and immediately after orders; positions/P&L updated with
+  **fees** and **liquidity flags**; processed-fills pruning.
 
 ### Notes
-- Env template unchanged; keep real secrets in `APIkeys.env` locally. :contentReference[oaicite:15]{index=15}
-- v1.0.1 runs **on candle closes** by default. To emulate tick-style behavior, reduce `confirm_candles` and/or switch `mode` to `"local"` with a shorter `candle_interval`. :contentReference[oaicite:16]{index=16} :contentReference[oaicite:17]{index=17}
+- Still **tick-based** (not yet candle aggregation).
+- Env template unchanged; keep real secrets in `APIkeys.env` locally.
 
 
 ## [v1.0.0] - 2025-09-18
