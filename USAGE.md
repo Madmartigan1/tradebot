@@ -13,3 +13,6 @@ cp APIkeys.env.example APIkeys.env
 #   COINBASE_API_KEY=...
 #   COINBASE_API_SECRET=...
 #   COINBASE_PORTFOLIO_ID=...   # optional
+
+#Run the  program
+>>>python main.py

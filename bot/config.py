@@ -12,7 +12,7 @@ class BotConfig:
         "DOT-USD","ARB-USD",
     ])
 
-    # -------- Candles v1.2 --------
+    # -------- Candles v1.0.1 --------
     mode: str = "ws"                   # or "local" if you want local aggregation, ws is fine by default.
     candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
     min_candles: int = 120             # wait for indicator warm-up
