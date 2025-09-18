@@ -3,24 +3,25 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+
 ## [v1.0.1] - 2025-09-18
 ### Added
+- **Candle-based trading mode** (default **5m**): supports WS candles or **local aggregation** from ticker; warm-up/backfill and `confirm_candles=3`.
 - **KPI CSV logging** to `.state/trades.csv` (slippage, fees, liquidity, hold time, etc.).
-- **Advisors refactor**: `strategy.py` introduces normalized **MACD in bps** + one-sided **RSI veto**
-  (BUY blocked if overbought, SELL blocked if oversold).
+- **Advisors refactor**: normalized **MACD in bps**; one-sided **RSI veto** (blocks BUYs if overbought, SELLs if oversold).
 
 ### Changed
-- **Defaults tightened & risk controls**:
-  - `dry_run=False`
-  - `usd_per_order=20`
-  - `daily_spend_cap_usd=120`
-  - `per_product_cooldown_s=900`
-  - `hard_stop_bps=120`
-- **EMA config**: global `short_ema=40 / long_ema=120`; `min_ticks=120`; backfill warm-up of 200 ticks;
-  per-product overrides disabled.
-- **Maker logic**: optional `prefer_maker_for_sells`; limit pricing uses exchange increments and clamps
-  SELL size to held position; consistent formatting with `decimals_from_inc`.
-- **Products**: updated list (e.g., **FIL-USD**, **DOT-USD**, **ARB-USD** added).
+- **Risk & defaults**: `dry_run=False`, `usd_per_order=20`, `daily_spend_cap_usd=120`, `per_product_cooldown_s=900`, `hard_stop_bps=120`.
+- **EMA config**: global `short_ema=40 / long_ema=120`, `min_candles=120`, backfill `warmup_candles=200`; per-product overrides disabled.
+- **Maker logic**: optional `prefer_maker_for_sells`; limit pricing uses exchange increments; SELL size clamped to held position; consistent decimal formatting.
+- **Products**: list updated (e.g., **FIL-USD**, **DOT-USD**, **ARB-USD** added).
+
+### Improved
+- **Fills reconciliation** on startup and immediately after orders; positions/P&L updated with **fees** and **liquidity flags**; processed-fills pruning.
+
+### Notes
+- Runs **on candle closes** by default. For faster behavior, set `confirm_candles=1` and/or `candle_interval="1m"`.
+- Env template unchanged; keep real secrets in `APIkeys.env` locally.
 
 ### Improved
 - **Fills reconciliation**: on startup and immediately after orders; positions/P&L updated with
@@ -29,6 +30,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 ### Notes
 - Still **tick-based** (not yet candle aggregation).
 - Env template unchanged; keep real secrets in `APIkeys.env` locally.
+
 
 
 ## [v1.0.0] - 2025-09-18
@@ -48,6 +50,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - Env template unchanged (`APIkeys.env.example` should be updated by each user locally).
 - `.state/` files still local-only and ignored by Git.
 - Advisors can be tuned via `strategy.py` or config thresholds.
+
 
 
 ## [v0.2.0] - 2025-09-17
@@ -73,6 +76,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - If you want previous RSI behavior, set `rsi_buy_floor=30`, `rsi_sell_ceiling=70` in `bot/config.py`.
 
 
+
 ## [v0.1.1-betaB] - 2025-09-17
 ### Added
 - `bot/utils.py` centralizes state paths, JSON read/write, daily spend & cooldown tracking, and trade-log writing.
@@ -91,8 +95,6 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - Some duplication remains in `orders.py` / `constants.py` / `persistence.py` (to be consolidated later).
 
 
-All notable changes to this project will be documented in this file.
-This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 ## [v0.1.0-betaA] - 2025-09-17
 ### Added
