@@ -3,6 +3,25 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+## [v1.0.0] - 2025-09-18
+### Added
+- First **stable release** (no longer beta).
+- New **advisor module** (`strategy.py`) to hold RSI/MACD thresholds and veto logic separately.
+- Full **PDF documentation** (`docs/README.pdf`) linked from the root README.
+
+### Changed
+- **Config** now loads API keys/portfolio ID from `APIkeys.env` via `dotenv`; bot exits early if creds missing.
+- **Maker order logic** refactored and centralized; uses per-product increments and consistent rounding.
+- **Persistence** (daily spend, cooldowns, portfolio, fills) split into dedicated `persistence.py` with JSON helpers.
+- Logging upgraded with **stream handler setup** (`logging_setup.py`) and more informative session footers.
+- `main.py` runs cleanly under asyncio with graceful shutdown and P&L baseline setting.
+
+### Notes
+- Env template unchanged (`APIkeys.env.example` should be updated by each user locally).
+- `.state/` files still local-only and ignored by Git.
+- Advisors can be tuned via `strategy.py` or config thresholds.
+
+
 ## [v0.2.0] - 2025-09-17
 ### Added
 - EMA crossover **dead-band** (`ema_deadband_bps=8.0`) to reduce signal flapping. 
