@@ -1,7 +1,6 @@
 # main.py
 import os
 import sys
-import asyncio
 import logging
 import signal
 from dotenv import load_dotenv
@@ -16,80 +15,48 @@ def setup_logging():
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-def load_secrets():
-    # Allow an override; fall back to environment-only if file missing.
-    env_path = os.getenv("ENV_FILE", "APIkeys.env")
-    try:
-        load_dotenv(dotenv_path=env_path)
-    except Exception:
-        # Not fatal—env vars might already be set.
-        pass
+def main():
+    setup_logging()
+    log = logging.getLogger("main")
+    load_dotenv(dotenv_path=os.getenv("ENV_PATH", "APIkeys.env"))
 
     api_key = os.getenv("COINBASE_API_KEY")
     api_secret = os.getenv("COINBASE_API_SECRET")
-    portfolio_id = os.getenv("COINBASE_PORTFOLIO_ID") or None
+    portfolio_id = os.getenv("PORTFOLIO_ID")
 
     if not api_key or not api_secret:
-        print("ERROR: Missing COINBASE_API_KEY or COINBASE_API_SECRET in environment.")
-        sys.exit(2)
+        log.error("Missing COINBASE_API_KEY / COINBASE_API_SECRET in environment.")
+        sys.exit(1)
 
-    return api_key, api_secret, portfolio_id
-
-def install_signal_handlers(bot: TradeBot, loop: asyncio.AbstractEventLoop):
-    # Flip bot.stop_requested on SIGINT/SIGTERM when supported.
-    def _request_stop():
-        try:
-            bot.stop_requested = True
-        except Exception:
-            # If your TradeBot exposes a method instead, swap this call:
-            # bot.request_stop()
-            pass
-
-    for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None)):
-        if sig is None:
-            continue
-        try:
-            loop.add_signal_handler(sig, _request_stop)
-        except NotImplementedError:
-            # Windows / certain environments don’t support it; rely on KeyboardInterrupt.
-            pass
-
-async def run_bot():
-    setup_logging()
-    log = logging.getLogger("main")
-
-    api_key, api_secret, portfolio_id = load_secrets()
-
-    # Single instantiation (removed duplicate)
-    bot = TradeBot(CONFIG, api_key, api_secret, portfolio_id=portfolio_id)
-    loop = asyncio.get_running_loop()
-    install_signal_handlers(bot, loop)
-
-    # Reconcile/initialize
-    bot.reconcile_recent_fills(lookback_hours=CONFIG.lookback_hours)
+    bot = TradeBot(CONFIG, api_key=api_key, api_secret=api_secret, portfolio_id=portfolio_id)
     bot.set_run_baseline()
+    
+    def handle_signal(sig, frame):
+        log.info("Signal %s received. Closing bot...", sig)
+        bot.close()
+        sys.exit(0)
 
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
+
+    # Open and subscribe, then hand control to the SDK's run loop.
+    bot.open()    
+    # --- OPTIONAL backfill on STARTUP (useful if you run the bot 2–3 short sessions/day and open orders remain to be filled.) ---
+    # --- If there are no pending open orders for a next run, leave it commented out.
     try:
-        log.info("Opening bot…")
-        bot.open()  # should return quickly (start threads/WS and return)
-        while not bot.stop_requested:
-            await asyncio.sleep(1)
-        log.info("Stop requested; shutting down…")
-    except KeyboardInterrupt:
-        log.info("Keyboard interrupt; shutting down…")
+       log.info("Gathering trade data from past %s hours...", CONFIG.lookback_hours)
+       bot.reconcile_recent_fills(CONFIG.lookback_hours)
+    except Exception as e:
+       log.warning("Reconcile on startup failed: %s", e)
+    # ----------------------------------------------------------------------------------------
+    try:
+        bot.run_ws_forever()
     finally:
         try:
             bot.close()
-        except Exception as e:
-            log.exception("Error during bot.close(): %s", e)
+        except Exception:
+            pass
 
-def _fallback_run(coro):
-    # Fallback for environments where asyncio.run() isn’t allowed.
-    loop = asyncio.get_event_loop()
-    return loop.run_until_complete(coro)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(run_bot())
-    except RuntimeError:
-        _fallback_run(run_bot())
+    main()

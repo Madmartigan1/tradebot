@@ -8,6 +8,7 @@ from .constants import (
     TRADE_LOG_FILE,
     PORTFOLIO_FILE,
     PROCESSED_FILLS_FILE,
+    TRADES_CSV_FILE,
 )
 
 from .persistence import (
