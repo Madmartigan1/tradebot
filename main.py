@@ -60,3 +60,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# bump: v1.0.2
