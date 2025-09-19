@@ -16,3 +16,5 @@ cp APIkeys.env.example APIkeys.env
 
 #Run the  program
 >>>python main.py
+
+<!-- bump: v1.0.2 -->
