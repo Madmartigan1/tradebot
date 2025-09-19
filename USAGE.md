@@ -1,4 +1,4 @@
-# USAGE
+﻿# USAGE
 
 ## 0) One-time setup
 ```bash
