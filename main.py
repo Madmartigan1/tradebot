@@ -1,4 +1,4 @@
-# main.py
+﻿# main.py
 import os
 import sys
 import logging
@@ -41,7 +41,7 @@ def main():
 
     # Open and subscribe, then hand control to the SDK's run loop.
     bot.open()    
-    # --- OPTIONAL backfill on STARTUP (useful if you run the bot 2–3 short sessions/day and open orders remain to be filled.) ---
+    # --- OPTIONAL backfill on STARTUP (useful if you run the bot 2â€“3 short sessions/day and open orders remain to be filled.) ---
     # --- If there are no pending open orders for a next run, leave it commented out.
     try:
        log.info("Gathering trade data from past %s hours...", CONFIG.lookback_hours)
