@@ -48,7 +48,7 @@ python -m venv .venv
 pip install -r requirements.txt
 copy APIkeys.env.example APIkeys.env   # fill your keys
 python .\main.py
----
+```
 
 ---
 
