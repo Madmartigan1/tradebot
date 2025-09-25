@@ -132,3 +132,5 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - No unit tests yet for rounding/advisors/P&L accounting.
 - Signals are tick-based; a candle-based strategy is planned for a future version.
 
+
+<!-- latest version -->

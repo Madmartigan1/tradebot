@@ -18,3 +18,5 @@ cp APIkeys.env.example APIkeys.env
 >>>python main.py
 
 <!-- bump: v1.0.2 -->
+
+<!-- latest version -->
