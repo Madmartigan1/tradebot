@@ -134,3 +134,5 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
 <!-- latest version -->
+
+<!-- changelog info -->

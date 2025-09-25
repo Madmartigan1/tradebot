@@ -20,3 +20,5 @@ cp APIkeys.env.example APIkeys.env
 <!-- bump: v1.0.2 -->
 
 <!-- latest version -->
+
+<!-- Running the program -->
