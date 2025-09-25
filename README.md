@@ -36,7 +36,7 @@ By default, it now runs on **candle closes** (5-minute interval, `confirm_candle
 ---
 
 ## 🔐 Secrets
-Copy `APIkeys.env.example` â†’ `APIkeys.env` and fill your Coinbase credentials.  
+Copy `APIkeys.env.example` -> `APIkeys.env` and fill your Coinbase credentials.  
 `APIkeys.env` is **.gitignored** â€” never commit real keys.
 
 ---
