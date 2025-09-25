@@ -1,4 +1,4 @@
-﻿# Tradebot v1.0.3
+# Tradebot v1.0.3
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
