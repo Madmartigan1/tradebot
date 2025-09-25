@@ -13,7 +13,7 @@ A minimal crypto **EMA crossover trade bot** that listens to Coinbase Advanced W
 
 ## Repo layout
 
-## ?? Disclaimer:
+## ⚠️ Disclaimer:
 This bot is intended for educational and experimental purposes only. It is not financial advice and will not guarantee profit. Use it at your own risk.
 Always do your own research, monitor your trades, and configure the system to match your risk tolerance.
 Past performance is not indicative of future results. Trade responsibly.
