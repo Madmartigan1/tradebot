@@ -1,4 +1,4 @@
-# Tradebot v1.0.2
+﻿# Tradebot v1.0.3
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -8,7 +8,7 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-🚀 **Refinements & stability improvements**
+ðŸš€ **Refinements & stability improvements**
 
 Tradebot is an automated crypto trading bot for **Coinbase Advanced**.  
 It uses an **EMA crossover** strategy with **RSI/MACD advisors**, plus risk controls like daily caps, cooldowns, and optional stop-loss tolerance.  
@@ -16,7 +16,7 @@ By default, it now runs on **candle closes** (5-minute interval, `confirm_candle
 
 ---
 
-## 📄 Documentation
+## ðŸ“„ Documentation
 - **Full User Guide (PDF):** [docs/README.pdf](docs/README.pdf)
 - More docs:
   - [USAGE.md](USAGE.md)
@@ -25,23 +25,23 @@ By default, it now runs on **candle closes** (5-minute interval, `confirm_candle
 
 ---
 
-## ✨ v1.0.2 Highlights
+## âœ¨ v1.0.3 Highlights
 - Refined **maker-limit logic**: prices rounded consistently to Coinbase increments
 - **Repricing controls** for unfilled maker orders (`reprice_each_candle`, `max_reprices_per_signal`, etc.)
 - **KPI CSV logging expanded**: now includes slippage (abs & bps) and hold time
-- **Risk & advisors tweaked**: daily BUY cap $160, RSI defaults 60/40, MACD ±3 bps
+- **Risk & advisors tweaked**: daily BUY cap $160, RSI defaults 60/40, MACD Â±3 bps
 - **EMA deadband**: 8 bps neutral zone to reduce false crossovers
 - **Persistence improvements**: custom `.state/` dir via `BOT_STATE_DIR`, log rotation for trade logs
 
 ---
 
-## 🔐 Secrets
-Copy `APIkeys.env.example` → `APIkeys.env` and fill your Coinbase credentials.  
-`APIkeys.env` is **.gitignored** — never commit real keys.
+## ðŸ” Secrets
+Copy `APIkeys.env.example` â†’ `APIkeys.env` and fill your Coinbase credentials.  
+`APIkeys.env` is **.gitignored** â€” never commit real keys.
 
 ---
 
-## 🛠️ Quickstart
+## ðŸ› ï¸ Quickstart
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -52,7 +52,9 @@ python .\main.py
 
 ---
 
-## ⚠️ Disclaimer
+## âš ï¸ Disclaimer
 This bot is intended for educational and experimental purposes only. It is not financial advice and will not guarantee profit. Use it at your own risk.
 Always do your own research, monitor your trades, and configure the system to match your risk tolerance.
 Past performance is not indicative of future results. Trade responsibly.
+
+<!-- latest version 2025-09-25T11:16:01 -->

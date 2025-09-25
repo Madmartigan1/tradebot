@@ -136,3 +136,5 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 <!-- latest version -->
 
 <!-- changelog info -->
+
+<!-- latest version 2025-09-25T11:16:01 -->
