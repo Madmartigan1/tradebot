@@ -1,4 +1,4 @@
-﻿# Tradebot v1.0.3
+# Tradebot v1.0.3
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -8,7 +8,7 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-ðŸš€ **Refinements & stability improvements**
+🚀 **Refinements & stability improvements**
 
 Tradebot is an automated crypto trading bot for **Coinbase Advanced**.  
 It uses an **EMA crossover** strategy with **RSI/MACD advisors**, plus risk controls like daily caps, cooldowns, and optional stop-loss tolerance.  
@@ -16,7 +16,7 @@ By default, it now runs on **candle closes** (5-minute interval, `confirm_candle
 
 ---
 
-## ðŸ“„ Documentation
+## ⚓ Documentation
 - **Full User Guide (PDF):** [docs/README.pdf](docs/README.pdf)
 - More docs:
   - [USAGE.md](USAGE.md)
@@ -25,7 +25,7 @@ By default, it now runs on **candle closes** (5-minute interval, `confirm_candle
 
 ---
 
-## âœ¨ v1.0.3 Highlights
+## ✨ v1.0.3 Highlights
 - Refined **maker-limit logic**: prices rounded consistently to Coinbase increments
 - **Repricing controls** for unfilled maker orders (`reprice_each_candle`, `max_reprices_per_signal`, etc.)
 - **KPI CSV logging expanded**: now includes slippage (abs & bps) and hold time
@@ -35,13 +35,13 @@ By default, it now runs on **candle closes** (5-minute interval, `confirm_candle
 
 ---
 
-## ðŸ” Secrets
+## 🔐 Secrets
 Copy `APIkeys.env.example` â†’ `APIkeys.env` and fill your Coinbase credentials.  
 `APIkeys.env` is **.gitignored** â€” never commit real keys.
 
 ---
 
-## ðŸ› ï¸ Quickstart
+## 🛠️ Quickstart
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -52,7 +52,7 @@ python .\main.py
 
 ---
 
-## âš ï¸ Disclaimer
+## ⚠️ Disclaimer:
 This bot is intended for educational and experimental purposes only. It is not financial advice and will not guarantee profit. Use it at your own risk.
 Always do your own research, monitor your trades, and configure the system to match your risk tolerance.
 Past performance is not indicative of future results. Trade responsibly.
