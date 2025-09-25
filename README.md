@@ -41,6 +41,8 @@ copy APIkeys.env.example APIkeys.env   # fill your keys
 python .\main.py
 ```
 
+---
+
 ## ⚠️ Disclaimer:
 This bot is intended for educational and experimental purposes only. It is not financial advice and will not guarantee profit. Use it at your own risk.
 Always do your own research, monitor your trades, and configure the system to match your risk tolerance.
