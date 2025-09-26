@@ -57,7 +57,7 @@ class BotConfig:
     macd_sell_max: float = -3.0        # SELL only if MACD ≤ −3.0 bps
 
     # Ops / Risk
-    dry_run: bool = True               # Change to False for live trading
+    dry_run: bool = False               # Change to False for live trading
     usd_per_order: float = 20.0
     daily_spend_cap_usd: float = 160.0  # buys stop after cap; sells continue
     per_product_cooldown_s: int = 900   
