@@ -14,7 +14,7 @@ class BotConfig:
 
     # --- v1.0.3: Autotune (startup-only) ---
     autotune_enabled: bool = True
-    autotune_preview_only: bool = False       # first time run set True: preview only (no changes applied)
+    autotune_preview_only: bool = True       # first time run set True: preview only (no changes applied)
     autotune_lookback_hours: int = 18        # bump to 24–72h if you skipped days
 
     # --- v1.0.3: Reconciliation during the session ---
@@ -48,7 +48,7 @@ class BotConfig:
     macd_sell_max: float = -3.0        # SELL only if MACD ≤ −3.0 bps
 
     # Ops / Risk
-    dry_run: bool = False
+    dry_run: bool = True               # Change to False for live trading
     usd_per_order: float = 20.0
     daily_spend_cap_usd: float = 160.0  # buys stop after cap; sells continue
     per_product_cooldown_s: int = 900   
