@@ -1,7 +1,22 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
+
+## [v1.0.3] - 2025-09-25
+### Added
+- autotune.py file that adjusts parameters dynamically (see /docs/README.pdf for more details)
+- Fixed Control+C for graceful shutdown. Trades are reconciled before exit.
+- Added a mid-session reconciliation in case there is a buy and same asset is a candidate for a sell later.
+- Option to run an intraday auto tuning.
+
+### Changed
+- Risk is now adaptive based on market conditions. Lookback is 18 hours by default.
+- Advisors(RSI/MACD) are part of dynamic parameter modifications.
+
+### Improved
+- Shutdown is preceded by statemachine saving data in trades.CSV
+
 
 ## [v1.0.2] - 2025-09-18
 ### Added
@@ -132,3 +147,9 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - No unit tests yet for rounding/advisors/P&L accounting.
 - Signals are tick-based; a candle-based strategy is planned for a future version.
 
+
+<!-- latest version -->
+
+<!-- changelog info -->
+
+<!-- latest version 2025-09-25T11:16:01 -->
