@@ -16,6 +16,22 @@ By default, it now runs on **candle closes** (5-minute interval, `confirm_candle
 
 ---
 
+## ⚓ The Fleet Metaphor
+To make the strategy easier to visualize:
+
+- **EMA → Captain**  
+  The EMA crossover is the leader and core signal engine. When the short EMA crosses the long EMA, the Captain gives the order.
+
+- **MACD → Commodore**  
+  The Commodore confirms momentum and trend direction. If the histogram disagrees, the Captain’s signal can be overridden.
+
+- **RSI → Skipper**  
+  The Skipper keeps things safe in the short term. If RSI shows overbought/oversold, trades are vetoed even if the Captain/Commodore want action.
+
+Together, they form a chain of command: **EMA (Captain)** gives orders, **MACD (Commodore)** ensures strategy aligns with trend, and **RSI (Skipper)** vetoes reckless moves.
+
+---
+
 ## 📄 Documentation
 - **Full User Guide (PDF):** [docs/README.pdf](docs/README.pdf)
 - More docs:
