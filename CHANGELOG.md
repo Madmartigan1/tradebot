@@ -1,7 +1,40 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
+
+## [v1.0.3] - 2025-09-25
+### Added
+- autotune.py file that adjusts parameters dynamically (see /docs/README.pdf for more details)
+- Fixed Control+C for graceful shutdown. Trades are reconciled before exit.
+- Added a mid-session reconciliation in case there is a buy and same asset is a candidate for a sell later.
+- Option to run an intraday auto tuning.
+
+### Changed
+- Risk is now adaptive based on market conditions. Lookback is 18 hours by default.
+- Advisors(RSI/MACD) are part of dynamic parameter modifications.
+
+### Improved
+- Shutdown is preceded by statemachine saving data in trades.CSV
+
+
+## [v1.0.2] - 2025-09-18
+### Added
+- Repricing for resting maker orders: `reprice_each_candle`, `reprice_if_unfilled_candles`, `max_reprices_per_signal`, `reprice_jitter_ms`, plus per-asset `ttf_target_candles_per_product`.
+- CSV KPIs now include `slippage_abs`, `slippage_bps`, and `hold_time_sec`.
+- `BOT_STATE_DIR` lets you relocate `.state/` safely; auto-creates the directory.
+- Trade log rotation to keep `trade_log.txt` tidy.
+
+### Changed
+- Risk defaults: daily BUY cap increased to **$160**.
+- Advisors: defaults relaxed to RSI buy≤60 / sell≥40; MACD thresholds ±3 bps.
+- EMA deadband (`ema_deadband_bps=8.0`) to reduce crossover flapping.
+- **Env var**: portfolio now read from `PORTFOLIO_ID` (not `COINBASE_PORTFOLIO_ID`).
+
+### Improved
+- Immediate fills update P&L and CSV with intent-based slippage and position hold time.
+- Startup reconcile remains available with `lookback_hours`.
+
 
 
 ## [v1.0.1] - 2025-09-18
@@ -114,3 +147,9 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - No unit tests yet for rounding/advisors/P&L accounting.
 - Signals are tick-based; a candle-based strategy is planned for a future version.
 
+
+<!-- latest version -->
+
+<!-- changelog info -->
+
+<!-- latest version 2025-09-25T11:16:01 -->

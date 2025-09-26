@@ -1,52 +1,44 @@
-# Tradebot v1.0.1
+# Tradebot v1.0.3
 
-🚀 **Candle-based trading by default**  
-This release marks the transition from tick-driven signals (v1.0.0 and earlier) to **candle closes** (default: 5-minute). Ticks can still be used via local aggregation or config tweaks, but candles are recommended for smoother, less noisy signals.
+[![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
+[![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](requirements.txt)
+[![Last commit](https://img.shields.io/github/last-commit/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/commits/main)
+[![Open issues](https://img.shields.io/github/issues/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/issues)
+[![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
+[![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
----
+🚀 **Refinements & stability improvements**
 
-## ⚓ The Fleet Metaphor
-To make the strategy easier to visualize:
-
-- **EMA → Captain**  
-  The EMA crossover is the leader and core signal engine. When the short EMA crosses the long EMA, the Captain gives the order.
-
-- **MACD → Commodore**  
-  The Commodore confirms momentum and trend direction. If the histogram disagrees, the Captain’s signal can be overridden.
-
-- **RSI → Skipper**  
-  The Skipper keeps things safe in the short term. If RSI shows overbought/oversold, trades are vetoed even if the Captain/Commodore want action.
-
-Together, they form a chain of command: **EMA (Captain)** gives orders, **MACD (Commodore)** ensures strategy aligns with trend, and **RSI (Skipper)** vetoes reckless moves.
+Tradebot is an automated crypto trading bot for **Coinbase Advanced**.  
+It uses an **EMA crossover** strategy with **RSI/MACD advisors**, plus risk controls like daily caps, cooldowns, and optional stop-loss tolerance.  
+By default, it now runs on **candle closes** (5-minute interval, `confirm_candles=3`).
 
 ---
 
-## 📄 Documentation
-- **Full User Guide (PDF):** [docs/README.pdf](docs/README.pdf)  
-- Additional docs:
+## ⚓ Documentation
+- **Full User Guide (PDF):** [docs/README.pdf](docs/README.pdf)
+- More docs:
   - [USAGE.md](USAGE.md)
   - [CONTRIBUTING.md](CONTRIBUTING.md)
   - [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
-## ✨ Highlights in v1.0.1
-- **Candle-based mode (default 5m)** with backfill/warmup and `confirm_candles=3`.
-- **KPI CSV logging** to `.state/trades.csv` (slippage, fees, liquidity, hold time).
-- **Advisors refactor:** MACD normalized to bps; RSI veto simplified to block only unsafe sides.
-- **Risk defaults tightened:**  
-  - `dry_run=False`  
-  - `$20` per order  
-  - `$120` daily cap  
-  - 15-minute cooldown  
-  - Hard stop at -120 bps
-- **Products updated:** new assets added (FIL-USD, DOT-USD, ARB-USD).
+## ✨ v1.0.3 Highlights
+- Refined **maker-limit logic**: prices rounded consistently to Coinbase increments
+- **Repricing controls** for unfilled maker orders (`reprice_each_candle`, `max_reprices_per_signal`, etc.)
+- **KPI CSV logging expanded**: now includes slippage (abs & bps) and hold time
+- **Risk & advisors tweaked**: daily BUY cap $160, RSI defaults 60/40, MACD Â±3 bps
+- **EMA deadband**: 8 bps neutral zone to reduce false crossovers
+- **Persistence improvements**: custom `.state/` dir via `BOT_STATE_DIR`, log rotation for trade logs
 
 ---
 
 ## 🔐 Secrets
-Copy `APIkeys.env.example` → `APIkeys.env` and fill in your Coinbase Advanced API keys.  
-`APIkeys.env` is **.gitignored** — never commit real keys.
+Copy `APIkeys.env.example` -> `APIkeys.env` and fill your Coinbase credentials.  
+`APIkeys.env` is **.gitignored** 
+Never commit real keys.
 
 ---
 

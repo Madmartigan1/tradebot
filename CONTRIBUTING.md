@@ -2,9 +2,7 @@
 
 
 
-Thanks for considering a contribution! This is a small Python trade bot that
-
-uses EMA (captain) with RSI/MACD advisors. The repo is MIT-licensed.
+Thanks for considering a contribution! This is a small Python trade bot that uses EMA (captain) with RSI/MACD advisors. The repo is MIT-licensed.
 
 
 

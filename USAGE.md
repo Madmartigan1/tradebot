@@ -1,4 +1,4 @@
-# USAGE
+﻿# USAGE
 
 ## 0) One-time setup
 ```bash
@@ -16,3 +16,10 @@ cp APIkeys.env.example APIkeys.env
 
 #Run the  program
 >>>python main.py
+
+
+<!-- latest version -->
+
+<!-- Running the program -->
+
+<!-- latest version 2025-09-25T11:16:01 -->

@@ -1,9 +1,9 @@
-
 # bot/tradebot.py
 import json
 import logging
 import time
 import uuid
+import threading
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Tuple
@@ -80,6 +80,9 @@ class TradeBot:
     def __init__(self, cfg, api_key: str, api_secret: str, portfolio_id: Optional[str] = None):
         self.cfg = cfg
         self.portfolio_id = portfolio_id if portfolio_id is not None else getattr(cfg, "portfolio_id", None)
+
+        # Thread locking to prevent races in state + CSV writes
+        self._state_lock = threading.RLock()
 
         # REST/WS
         self.api_key = api_key
@@ -386,10 +389,12 @@ class TradeBot:
             path = TRADES_CSV_FILE
             path.parent.mkdir(parents=True, exist_ok=True)
             new_file = not path.exists()
-            with open(path, "a", newline="") as f:
-                if new_file:
-                    f.write(",".join(headers) + "\n")
-                f.write(",".join(map(str, row)) + "\n")
+            # single-writer guard (prevents interleaved lines)
+            with self._state_lock:
+                with open(path, "a", newline="") as f:
+                    if new_file:
+                        f.write(",".join(headers) + "\n")
+                    f.write(",".join(map(str, row)) + "\n")
         except Exception as e:
             logging.debug("CSV append failed: %s", e)
 
@@ -499,6 +504,13 @@ class TradeBot:
         cooldown_s = int(getattr(self.cfg, "per_product_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
         if not self.last.ok(product_id, cooldown_s):
             return
+
+        # --- v1.0.3: Just-in-time reconcile before SELL position check ---
+        if signal < 0 and getattr(self.cfg, "reconcile_on_sell_attempt", False):
+            try:
+                self.reconcile_now(hours=getattr(self.cfg, "lookback_hours", 48))
+            except Exception as e:
+                logging.debug("Pre-SELL reconcile failed for %s: %s", product_id, e)
 
         # SELL guardrails: must hold position
         if signal < 0 and self.positions[product_id] <= 0.0:
@@ -700,70 +712,72 @@ class TradeBot:
                 any_new = False
                 fee_total = 0.0
                 liq_flags = set()
-                for f in fb.get("fills", []):
-                    fp = self._fill_fingerprint(f)
-                    if fp in self._processed_fills:
-                        continue
-                    side_f = (f.get("side") or f.get("order_side") or "").upper()
-                    pid_f = f.get("product_id")
-                    size_f = float(f.get("size") or f.get("base_size") or f.get("filled_size") or 0.0)
-                    price_f = float(f.get("price") or 0.0)
-                    fee_f = float(f.get("fee") or 0.0)
-                    if side_f == "BUY":
-                        new_qty = self.positions[pid_f] + size_f
-                        new_cost = self.cost_basis[pid_f] * self.positions[pid_f] + (size_f * price_f) + fee_f
-                        if new_qty > 0:
-                            self.positions[pid_f] = new_qty
-                            self.cost_basis[pid_f] = new_cost / new_qty
-                    elif side_f == "SELL":
-                        qty_before = self.positions[pid_f]
-                        sell_qty = min(size_f, qty_before)
-                        self.realized_pnl += sell_qty * (price_f - self.cost_basis[pid_f]) - fee_f
-                        self.positions[pid_f] = max(0.0, qty_before - sell_qty)
-                        if self.positions[pid_f] == 0.0:
-                            self.cost_basis[pid_f] = 0.0
-                    self._processed_fills[fp] = {"t": f.get("trade_time") or f.get("time")}
-                    any_new = True
-                    try:
-                        fee_total += fee_f
-                    except Exception:
-                        pass
-                    flag = f.get("liquidity_indicator")
-                    if flag:
-                        liq_flags.add(flag)
-
-                    # KPI CSV logging (immediate)
-                    try:
-                        ts_iso = (f.get("trade_time") or f.get("time") or datetime.now(timezone.utc).isoformat())
-                        oid = str(order_id) if order_id else None
-                        intent = self._intent.get(oid, {})
-                        intent_price = intent.get("intent_price")
-                        pnl_fill = None
-                        if side_f == "SELL":
-                            try:
-                                sell_qty = min(size_f, self.positions.get(pid_f, 0.0) + size_f)
-                                pnl_fill = sell_qty * (price_f - self.cost_basis[pid_f]) - fee_f
-                            except Exception:
-                                pnl_fill = None
-                        hold_time_sec = None
+                # Guard per-fill mutations + CSV to avoid races with reconcile thread
+                with self._state_lock:
+                    for f in fb.get("fills", []):
+                        fp = self._fill_fingerprint(f)
+                        if fp in self._processed_fills:
+                            continue
+                        side_f = (f.get("side") or f.get("order_side") or "").upper()
+                        pid_f = f.get("product_id")
+                        size_f = float(f.get("size") or f.get("base_size") or f.get("filled_size") or 0.0)
+                        price_f = float(f.get("price") or 0.0)
+                        fee_f = float(f.get("fee") or 0.0)
+                        if side_f == "BUY":
+                            new_qty = self.positions[pid_f] + size_f
+                            new_cost = self.cost_basis[pid_f] * self.positions[pid_f] + (size_f * price_f) + fee_f
+                            if new_qty > 0:
+                                self.positions[pid_f] = new_qty
+                                self.cost_basis[pid_f] = new_cost / new_qty
+                        elif side_f == "SELL":
+                            qty_before = self.positions[pid_f]
+                            sell_qty = min(size_f, qty_before)
+                            self.realized_pnl += sell_qty * (price_f - self.cost_basis[pid_f]) - fee_f
+                            self.positions[pid_f] = max(0.0, qty_before - sell_qty)
+                            if self.positions[pid_f] == 0.0:
+                                self.cost_basis[pid_f] = 0.0
+                        self._processed_fills[fp] = {"t": f.get("trade_time") or f.get("time")}
+                        any_new = True
                         try:
-                            if side_f == "BUY":
-                                if (self.positions[pid_f] - size_f) <= 0 and self.positions[pid_f] > 0:
-                                    self._entry_time[pid_f] = time.time()
-                            elif side_f == "SELL":
-                                if self.positions[pid_f] == 0.0 and self._entry_time.get(pid_f):
-                                    hold_time_sec = max(0.0, time.time() - self._entry_time[pid_f])
-                                    self._entry_time[pid_f] = None
+                            fee_total += fee_f
                         except Exception:
                             pass
-                        self._append_trade_csv(ts_iso=ts_iso, order_id=oid, side=side_f, product_id=pid_f,
-                                               size=size_f, price=price_f, fee=fee_f,
-                                               liquidity=flag, pnl=pnl_fill,
-                                               position_after=self.positions.get(pid_f),
-                                               cost_basis_after=self.cost_basis.get(pid_f),
-                                               intent_price=intent_price, hold_time_sec=hold_time_sec)
-                    except Exception as e:
-                        logging.debug("CSV log (immediate) failed: %s", e)
+                        flag = f.get("liquidity_indicator")
+                        if flag:
+                            liq_flags.add(flag)
+
+                        # KPI CSV logging (immediate)
+                        try:
+                            ts_iso = (f.get("trade_time") or f.get("time") or datetime.now(timezone.utc).isoformat())
+                            oid = str(order_id) if order_id else None
+                            intent = self._intent.get(oid, {})
+                            intent_price = intent.get("intent_price")
+                            pnl_fill = None
+                            if side_f == "SELL":
+                                try:
+                                    sell_qty = min(size_f, self.positions.get(pid_f, 0.0) + size_f)
+                                    pnl_fill = sell_qty * (price_f - self.cost_basis[pid_f]) - fee_f
+                                except Exception:
+                                    pnl_fill = None
+                            hold_time_sec = None
+                            try:
+                                if side_f == "BUY":
+                                    if (self.positions[pid_f] - size_f) <= 0 and self.positions[pid_f] > 0:
+                                        self._entry_time[pid_f] = time.time()
+                                elif side_f == "SELL":
+                                    if self.positions[pid_f] == 0.0 and self._entry_time.get(pid_f):
+                                        hold_time_sec = max(0.0, time.time() - self._entry_time[pid_f])
+                                        self._entry_time[pid_f] = None
+                            except Exception:
+                                pass
+                            self._append_trade_csv(ts_iso=ts_iso, order_id=oid, side=side_f, product_id=pid_f,
+                                                   size=size_f, price=price_f, fee=fee_f,
+                                                   liquidity=flag, pnl=pnl_fill,
+                                                   position_after=self.positions.get(pid_f),
+                                                   cost_basis_after=self.cost_basis.get(pid_f),
+                                                   intent_price=intent_price, hold_time_sec=hold_time_sec)
+                        except Exception as e:
+                            logging.debug("CSV log (immediate) failed: %s", e)
 
                 if any_new:
                     # prune if large
@@ -772,9 +786,10 @@ class TradeBot:
                         drop_n = max(1, max_keys // 5)
                         for k in list(self._processed_fills.keys())[:drop_n]:
                             self._processed_fills.pop(k, None)
-
-                    save_json(PROCESSED_FILLS_FILE, self._processed_fills)
-                    self._save_portfolio()
+                    # Guard saves as well
+                    with self._state_lock:
+                        save_json(PROCESSED_FILLS_FILE, self._processed_fills)
+                        self._save_portfolio()
                     run_delta = self.realized_pnl - self.run_pnl_baseline
                     pnl_str = f"{self.realized_pnl:.{PNL_DECIMALS}f}"
                     run_str = f"{run_delta:.{PNL_DECIMALS}f}"
@@ -854,55 +869,57 @@ class TradeBot:
                 changed = True
                 continue
 
-            if side == "BUY":
-                new_qty = self.positions[pid] + size
-                new_cost = self.cost_basis[pid] * self.positions[pid] + (size * price) + fee
-                if new_qty > 0:
-                    self.positions[pid] = new_qty
-                    self.cost_basis[pid] = new_cost / new_qty
-            else:
-                qty_before = self.positions[pid]
-                sell_qty = min(size, qty_before)
-                pnl_add = sell_qty * (price - self.cost_basis[pid]) - fee
-                self.realized_pnl += pnl_add
-                self.positions[pid] = max(0.0, qty_before - sell_qty)
-                if self.positions[pid] == 0.0:
-                    self.cost_basis[pid] = 0.0
+            # Guard each fill’s state mutations + CSV with the lock
+            with self._state_lock:
+                if side == "BUY":
+                    new_qty = self.positions[pid] + size
+                    new_cost = self.cost_basis[pid] * self.positions[pid] + (size * price) + fee
+                    if new_qty > 0:
+                        self.positions[pid] = new_qty
+                        self.cost_basis[pid] = new_cost / new_qty
+                else:
+                    qty_before = self.positions[pid]
+                    sell_qty = min(size, qty_before)
+                    pnl_add = sell_qty * (price - self.cost_basis[pid]) - fee
+                    self.realized_pnl += pnl_add
+                    self.positions[pid] = max(0.0, qty_before - sell_qty)
+                    if self.positions[pid] == 0.0:
+                        self.cost_basis[pid] = 0.0
 
-            self._processed_fills[fp] = {"t": f.get("trade_time") or f.get("time")}
+                self._processed_fills[fp] = {"t": f.get("trade_time") or f.get("time")}
 
-            # KPI CSV logging (reconcile)
-            try:
-                ts_iso = (f.get("trade_time") or f.get("time") or datetime.now(timezone.utc).isoformat())
-                oid = f.get("order_id")
-                intent = self._intent.get(str(oid), {}) if oid else {}
-                intent_price = intent.get("intent_price")
-                pnl_fill = None
-                if side == "SELL":
-                    try:
-                        sell_qty = min(size, self.positions.get(pid, 0.0) + size)
-                        pnl_fill = sell_qty * (price - self.cost_basis[pid]) - fee
-                    except Exception:
-                        pnl_fill = None
-                hold_time_sec = None
+                # KPI CSV logging (reconcile)
                 try:
-                    if side == "BUY":
-                        if (self.positions[pid] - size) <= 0 and self.positions[pid] > 0:
-                            self._entry_time[pid] = time.time()
-                    elif side == "SELL":
-                        if self.positions[pid] == 0.0 and self._entry_time.get(pid):
-                            hold_time_sec = max(0.0, time.time() - self._entry_time[pid])
-                            self._entry_time[pid] = None
-                except Exception:
-                    pass
-                self._append_trade_csv(ts_iso=ts_iso, order_id=str(oid) if oid else None, side=side, product_id=pid,
-                                       size=size, price=price, fee=fee,
-                                       liquidity=f.get("liquidity_indicator"), pnl=pnl_fill,
-                                       position_after=self.positions.get(pid),
-                                       cost_basis_after=self.cost_basis.get(pid),
-                                       intent_price=intent_price, hold_time_sec=hold_time_sec)
-            except Exception as e:
-                logging.debug("CSV log (reconcile) failed: %s", e)
+                    ts_iso = (f.get("trade_time") or f.get("time") or datetime.now(timezone.utc).isoformat())
+                    oid = f.get("order_id")
+                    intent = self._intent.get(str(oid), {}) if oid else {}
+                    intent_price = intent.get("intent_price")
+                    pnl_fill = None
+                    if side == "SELL":
+                        try:
+                            sell_qty = min(size, self.positions.get(pid, 0.0) + size)
+                            pnl_fill = sell_qty * (price - self.cost_basis[pid]) - fee
+                        except Exception:
+                            pnl_fill = None
+                    hold_time_sec = None
+                    try:
+                        if side == "BUY":
+                            if (self.positions[pid] - size) <= 0 and self.positions[pid] > 0:
+                                self._entry_time[pid] = time.time()
+                        elif side == "SELL":
+                            if self.positions[pid] == 0.0 and self._entry_time.get(pid):
+                                hold_time_sec = max(0.0, time.time() - self._entry_time[pid])
+                                self._entry_time[pid] = None
+                    except Exception:
+                        pass
+                    self._append_trade_csv(ts_iso=ts_iso, order_id=str(oid) if oid else None, side=side, product_id=pid,
+                                           size=size, price=price, fee=fee,
+                                           liquidity=f.get("liquidity_indicator"), pnl=pnl_fill,
+                                           position_after=self.positions.get(pid),
+                                           cost_basis_after=self.cost_basis.get(pid),
+                                           intent_price=intent_price, hold_time_sec=hold_time_sec)
+                except Exception as e:
+                    logging.debug("CSV log (reconcile) failed: %s", e)
 
             changed = True
 
@@ -913,9 +930,10 @@ class TradeBot:
                 drop_n = max(1, max_keys // 5)
                 for k in list(self._processed_fills.keys())[:drop_n]:
                     self._processed_fills.pop(k, None)
-
-            save_json(PROCESSED_FILLS_FILE, self._processed_fills)
-            self._save_portfolio()
+            # Guard final saves
+            with self._state_lock:
+                save_json(PROCESSED_FILLS_FILE, self._processed_fills)
+                self._save_portfolio()
             run_delta = self.realized_pnl - (getattr(self, "run_pnl_baseline", self.realized_pnl))
             pnl_str = f"{self.realized_pnl:.{PNL_DECIMALS}f}"
             run_str = f"{run_delta:.{PNL_DECIMALS}f}"
@@ -932,3 +950,18 @@ class TradeBot:
         min_needed = self.min_ticks_per_product.get(product_id, int(getattr(self.cfg, "min_candles", getattr(self.cfg, "min_ticks", 60))))
         if self.ticks[product_id] >= min_needed and s is not None and l is not None:
             self.evaluate_signal(product_id, close_price, s, l)
+
+    def reconcile_now(self, hours: Optional[int] = None) -> None:
+        """Idempotent, reentrant-safe sweep of recent fills."""
+        if getattr(self, "_reconciling", False):
+            logging.debug("Reconcile already running; skipping.")
+            return
+        self._reconciling = True
+        try:
+            h = int(hours or getattr(self.cfg, "lookback_hours", 48))
+            h = max(6, min(h, 48))  # gentle bounds
+            self.reconcile_recent_fills(h)
+        except Exception as e:
+            logging.exception("reconcile_now failed: %s", e)
+        finally:
+            self._reconciling = False
