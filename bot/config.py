@@ -21,7 +21,7 @@ class BotConfig:
     confirm_ticks: int = 2      # require 2 consecutive ticks to confirm a cross
 
     # Session controls
-    dry_run: bool = False            
+    dry_run: bool = True        # Change to False for live trading            
     usd_per_order: float = 20.0
     max_usd_per_day: float = 120.0
     cooldown_sec: int = 600
