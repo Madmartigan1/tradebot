@@ -32,7 +32,7 @@ Together, they form a chain of command: **EMA (Captain)** gives orders, **MACD (
 
 ---
 
-## ⚓ Documentation
+## 📘 Documentation
 - **Full User Guide (PDF):** [docs/README.pdf](docs/README.pdf)
 - More docs:
   - [USAGE.md](USAGE.md)
