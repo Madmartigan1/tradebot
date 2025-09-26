@@ -15,3 +15,6 @@ __pycache__/
 .DS_Store
 Thumbs.db
 'n*.docx'n*diff.txt
+
+# keep personal trade logs out of Git
+*.csv

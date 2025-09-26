@@ -1,7 +1,70 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
+
+## [v1.0.3] - 2025-09-25
+### Added
+- autotune.py file that adjusts parameters dynamically (see /docs/README.pdf for more details)
+- Fixed Control+C for graceful shutdown. Trades are reconciled before exit.
+- Added a mid-session reconciliation in case there is a buy and same asset is a candidate for a sell later.
+- Option to run an intraday auto tuning.
+
+### Changed
+- Risk is now adaptive based on market conditions. Lookback is 18 hours by default.
+- Advisors(RSI/MACD) are part of dynamic parameter modifications.
+
+### Improved
+- Shutdown is preceded by statemachine saving data in trades.CSV
+
+
+## [v1.0.2] - 2025-09-18
+### Added
+- Repricing for resting maker orders: `reprice_each_candle`, `reprice_if_unfilled_candles`, `max_reprices_per_signal`, `reprice_jitter_ms`, plus per-asset `ttf_target_candles_per_product`.
+- CSV KPIs now include `slippage_abs`, `slippage_bps`, and `hold_time_sec`.
+- `BOT_STATE_DIR` lets you relocate `.state/` safely; auto-creates the directory.
+- Trade log rotation to keep `trade_log.txt` tidy.
+
+### Changed
+- Risk defaults: daily BUY cap increased to **$160**.
+- Advisors: defaults relaxed to RSI buy≤60 / sell≥40; MACD thresholds ±3 bps.
+- EMA deadband (`ema_deadband_bps=8.0`) to reduce crossover flapping.
+- **Env var**: portfolio now read from `PORTFOLIO_ID` (not `COINBASE_PORTFOLIO_ID`).
+
+### Improved
+- Immediate fills update P&L and CSV with intent-based slippage and position hold time.
+- Startup reconcile remains available with `lookback_hours`.
+
+
+
+## [v1.0.1] - 2025-09-18
+### Added
+- **Candle-based trading mode** (default **5m**): supports WS candles or **local aggregation** from ticker; warm-up/backfill and `confirm_candles=3`.
+- **KPI CSV logging** to `.state/trades.csv` (slippage, fees, liquidity, hold time, etc.).
+- **Advisors refactor**: normalized **MACD in bps**; one-sided **RSI veto** (blocks BUYs if overbought, SELLs if oversold).
+
+### Changed
+- **Risk & defaults**: `dry_run=False`, `usd_per_order=20`, `daily_spend_cap_usd=120`, `per_product_cooldown_s=900`, `hard_stop_bps=120`.
+- **EMA config**: global `short_ema=40 / long_ema=120`, `min_candles=120`, backfill `warmup_candles=200`; per-product overrides disabled.
+- **Maker logic**: optional `prefer_maker_for_sells`; limit pricing uses exchange increments; SELL size clamped to held position; consistent decimal formatting.
+- **Products**: list updated (e.g., **FIL-USD**, **DOT-USD**, **ARB-USD** added).
+
+### Improved
+- **Fills reconciliation** on startup and immediately after orders; positions/P&L updated with **fees** and **liquidity flags**; processed-fills pruning.
+
+### Notes
+- Runs **on candle closes** by default. For faster behavior, set `confirm_candles=1` and/or `candle_interval="1m"`.
+- Env template unchanged; keep real secrets in `APIkeys.env` locally.
+
+### Improved
+- **Fills reconciliation**: on startup and immediately after orders; positions/P&L updated with
+  **fees** and **liquidity flags**; processed-fills pruning.
+
+### Notes
+- Still **tick-based** (not yet candle aggregation).
+- Env template unchanged; keep real secrets in `APIkeys.env` locally.
+
+
 
 ## [v1.0.0] - 2025-09-18
 ### Added
@@ -20,6 +83,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - Env template unchanged (`APIkeys.env.example` should be updated by each user locally).
 - `.state/` files still local-only and ignored by Git.
 - Advisors can be tuned via `strategy.py` or config thresholds.
+
 
 
 ## [v0.2.0] - 2025-09-17
@@ -45,6 +109,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - If you want previous RSI behavior, set `rsi_buy_floor=30`, `rsi_sell_ceiling=70` in `bot/config.py`.
 
 
+
 ## [v0.1.1-betaB] - 2025-09-17
 ### Added
 - `bot/utils.py` centralizes state paths, JSON read/write, daily spend & cooldown tracking, and trade-log writing.
@@ -63,8 +128,6 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - Some duplication remains in `orders.py` / `constants.py` / `persistence.py` (to be consolidated later).
 
 
-All notable changes to this project will be documented in this file.
-This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 ## [v0.1.0-betaA] - 2025-09-17
 ### Added
@@ -84,3 +147,9 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - No unit tests yet for rounding/advisors/P&L accounting.
 - Signals are tick-based; a candle-based strategy is planned for a future version.
 
+
+<!-- latest version -->
+
+<!-- changelog info -->
+
+<!-- latest version 2025-09-25T11:16:01 -->
