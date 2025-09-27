@@ -4,35 +4,6 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
-## [v1.0.1] - 2025-09-18
-### Added
-- **Candle-based trading mode** (default **5m**): supports WS candles or **local aggregation** from ticker; warm-up/backfill and `confirm_candles=3`.
-- **KPI CSV logging** to `.state/trades.csv` (slippage, fees, liquidity, hold time, etc.).
-- **Advisors refactor**: normalized **MACD in bps**; one-sided **RSI veto** (blocks BUYs if overbought, SELLs if oversold).
-
-### Changed
-- **Risk & defaults**: `dry_run=False`, `usd_per_order=20`, `daily_spend_cap_usd=120`, `per_product_cooldown_s=900`, `hard_stop_bps=120`.
-- **EMA config**: global `short_ema=40 / long_ema=120`, `min_candles=120`, backfill `warmup_candles=200`; per-product overrides disabled.
-- **Maker logic**: optional `prefer_maker_for_sells`; limit pricing uses exchange increments; SELL size clamped to held position; consistent decimal formatting.
-- **Products**: list updated (e.g., **FIL-USD**, **DOT-USD**, **ARB-USD** added).
-
-### Improved
-- **Fills reconciliation** on startup and immediately after orders; positions/P&L updated with **fees** and **liquidity flags**; processed-fills pruning.
-
-### Notes
-- Runs **on candle closes** by default. For faster behavior, set `confirm_candles=1` and/or `candle_interval="1m"`.
-- Env template unchanged; keep real secrets in `APIkeys.env` locally.
-
-### Improved
-- **Fills reconciliation**: on startup and immediately after orders; positions/P&L updated with
-  **fees** and **liquidity flags**; processed-fills pruning.
-
-### Notes
-- Still **tick-based** (not yet candle aggregation).
-- Env template unchanged; keep real secrets in `APIkeys.env` locally.
-
-
-
 ## [v1.0.0] - 2025-09-18
 ### Added
 - First **stable release** (no longer beta).
