@@ -17,10 +17,19 @@ class BotConfig:
     autotune_preview_only: bool = True       # first time run set True: preview only (no changes applied)
     autotune_lookback_hours: int = 18        # bump to 24–72h if you skipped days
 
+      
+    # Session controls
+    dry_run: bool = True        # Change to False for live trading            
+    usd_per_order: float = 20.0
+    max_usd_per_day: float = 120.0
+    cooldown_sec: int = 600
+    hard_stop_bps: int | None = 200   # real emergency stop at ~2%        
+
     # --- v1.0.3: Reconciliation during the session ---
     mid_reconcile_enabled: bool = True
     mid_reconcile_interval_minutes: int = 60  # hourly sweep
     reconcile_on_sell_attempt: bool = True    # quick sweep right before SELL
+
 
 
     # -------- Candles v1.0.2 --------
@@ -48,7 +57,7 @@ class BotConfig:
     macd_sell_max: float = -3.0        # SELL only if MACD ≤ −3.0 bps
 
     # Ops / Risk
-    dry_run: bool = True               # Change to False for live trading
+    dry_run: bool = False               # Change to False for live trading
     usd_per_order: float = 20.0
     daily_spend_cap_usd: float = 160.0  # buys stop after cap; sells continue
     per_product_cooldown_s: int = 900   

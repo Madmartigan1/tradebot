@@ -53,7 +53,6 @@ Together, they form a chain of command: **EMA (Captain)** gives orders, **MACD (
 
 ## 🔐 Secrets
 Copy `APIkeys.env.example` -> `APIkeys.env` and fill your Coinbase credentials.  
-`APIkeys.env` is **.gitignored**
 Never commit real keys.
 
 ---

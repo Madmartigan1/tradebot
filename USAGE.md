@@ -31,4 +31,3 @@ cp APIkeys.env.example APIkeys.env
 ```bash
 python main.py
 
-<!-- latest version -->
