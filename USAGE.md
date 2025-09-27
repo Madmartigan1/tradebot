@@ -1,6 +1,6 @@
 # USAGE
 
-## 0) One-time setup (do this once)
+## 0) First-time setup (do this once)
 ```bash
 python -m venv .venv
 
