@@ -1,2 +1,40 @@
-﻿* text=auto
+# Normalize line endings: keep LF in the repo; auto-convert on checkout if configured.
+* text=auto eol=lf
+
+# Source files (explicit LF)
+*.py   text eol=lf
+*.sh   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+*.csv  text eol=lf
+
+# Windows scripts (OPTIONAL): if you prefer CRLF locally, uncomment:
+# *.bat  text eol=crlf
+# *.cmd  text eol=crlf
+# *.ps1  text eol=crlf
+
+# Binary files (no end-of-line normalization or diff)
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.pdf  binary
+*.docx binary
+*.xlsx binary
+*.zip  binary
+*.7z   binary
+*.exe  binary
+*.dll  binary
+*.pyc  binary
+
+# (Optional) keep noisy/generated stuff out of source exports (git archive)
+.state/            export-ignore
+APIkeys.env        export-ignore
+"archive(older versions)/" export-ignore
+"working copy/"      export-ignore
+
 
