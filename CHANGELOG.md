@@ -3,6 +3,36 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+
+## [v1.0.4] - 2025-09-29
+### Changed
+- **Dynamic confirmations:** `tradebot.py` now reads `confirm_candles` directly from live config on every signal check, so **AutoTune** updates (e.g., 3→4 in choppy) take effect **mid-run** without a restart.
+- **Confirmation hygiene:** counters **reset on neutral** (deadband) bars and on **direction flips**; counter is lightly **bounded** to avoid runaway growth in long trends.
+- **Advisor startup log:** displays the current `confirm_candles` value from config (removed stale `_confirm_need` cache and duplicate log).
+- **AutoTune (choppy regime) now mirrors v1.0.2 profile** to restore turnover:
+  - `confirm_candles=3`, `per_product_cooldown_s=900`
+  - Advisors: `rsi_buy_max=60`, `rsi_sell_min=40`, `macd_buy_min=+3 bps`, `macd_sell_max=-3 bps`
+  - `ema_deadband_bps=8`
+- **Regime clamps**: Added per-regime soft rails so AutoTune can’t over-tighten in choppy; uptrend/downtrend keep v1.0.3 behavior with mild bounds.
+- **No product disabling in choppy** to preserve turnover; retains prior behavior in trending regimes.
+- **Maker offset sanity**: Enforced global floor/ceiling on `maker_offset_bps(_per_product)` to avoid extreme postings; still allows ±1 bps nudges from 3-day stats.
+
+### Added
+- **Readable AutoTune summary** shows `old→new` for each tuned knob, the portfolio regime vote, and per-product offset changes.
+
+### Fixed
+- Minor log-ordering issue where the advisors log could reference settings before they were fully initialized.
+- **Signal confirmation**: confirmation counter now persists across candles in the same direction and resets on neutrality, preventing premature resets.
+- **Dynamic config reads**: `confirm_candles` is re-read at signal time so mid-run AutoTune changes apply without restart.
+- **Side-aware maker behavior**: SELLs honor `prefer_maker_for_sells` (with size clamped to held position); LIMIT is used when maker is preferred, MARKET only for hard-stop or explicit fallback.
+- **KPI/CSV logging**: Added intent price + slippage (abs & bps), hold time on round trips, and guarded state writes to prevent race conditions during reconcile.
+
+### Notes
+- **Hard-stop** unchanged: if `hard_stop_bps` is set and price drops to the floor vs cost basis, bot exits via MARKET to cap downside.
+- If you want trend “fast-pass” (e.g., confirm=2 only when momentum is very strong), keep it off for now—evaluate 1.0.4 for a few days first.
+
+
+
 ## [v1.0.3] - 2025-09-25
 ### Added
 - autotune.py file that adjusts parameters dynamically (see /docs/README.pdf for more details)
@@ -16,6 +46,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 ### Improved
 - Shutdown is preceded by statemachine saving data in trades.CSV
+
 
 
 ## [v1.0.2] - 2025-09-18
@@ -34,6 +65,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 ### Improved
 - Immediate fills update P&L and CSV with intent-based slippage and position hold time.
 - Startup reconcile remains available with `lookback_hours`.
+
 
 
 
@@ -83,6 +115,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - Env template unchanged (`APIkeys.env.example` should be updated by each user locally).
 - `.state/` files still local-only and ignored by Git.
 - Advisors can be tuned via `strategy.py` or config thresholds.
+
 
 
 
