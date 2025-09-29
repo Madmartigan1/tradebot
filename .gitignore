@@ -1,4 +1,4 @@
-﻿# secrets
+# secrets
 APIkeys.env
 *.env
 
@@ -14,7 +14,6 @@ __pycache__/
 # OS cruft
 .DS_Store
 Thumbs.db
-'n*.docx'n*diff.txt
 
 # keep personal trade logs out of Git
 *.csv
