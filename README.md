@@ -1,4 +1,4 @@
-# Tradebot v1.0.3
+# Tradebot v1.0.4
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -41,13 +41,24 @@ Together, they form a chain of command: **EMA (Captain)** gives orders, **MACD (
 
 ---
 
-## ✨ v1.0.3 Highlights
-- Refined **maker-limit logic**: prices rounded consistently to Coinbase increments
-- **Repricing controls** for unfilled maker orders (`reprice_each_candle`, `max_reprices_per_signal`, etc.)
-- **KPI CSV logging expanded**: now includes slippage (abs & bps) and hold time
-- **Risk & advisors tweaked**: daily BUY cap $160, RSI defaults 60/40, MACD Â±3 bps
-- **EMA deadband**: 8 bps neutral zone to reduce false crossovers
-- **Persistence improvements**: custom `.state/` dir via `BOT_STATE_DIR`, log rotation for trade logs
+## ✨ v1.0.4 Highlights
+- **AutoTune-aware confirmations (no restart):** `confirm_candles` is read from config on every evaluation, so regime changes (e.g., choppy → confirm=4) apply mid-session.
+- **Cleaner confirmation flow:** counters reset on **neutral** bars and on **direction flips**; bounded to keep counts tidy.
+- **Accurate startup log:** advisor banner now prints the live `confirm_candles` value from config (removed stale cache).
+- **AutoTune choppy regime relaxed:** now defaults to the proven v1.0.2 profile during sideways markets:
+  - `confirm_candles=3`, `per_product_cooldown_s=900`
+  - `rsi_buy_max=60`, `rsi_sell_min=40`
+  - `macd_buy_min=+3`, `macd_sell_max=-3`
+  - `ema_deadband_bps=8`
+- **Trend regimes unchanged:** uptrend/downtrend retain v1.0.3 behavior (snappier in strength, stricter in weakness).
+- **Offset sanity bounds:** maker offsets are now clamped within safe floors/ceilings; still nudged ±1 bps based on 3-day stats.
+- **Disabled assets:** in choppy markets, AutoTune no longer disables assets — turnover is preserved.
+
+---
+
+### Upgrade notes
+- If you previously watched a cached `confirm` value in the startup log, it’s now accurate to the **current** config and will reflect any AutoTune initialization.
+- Hard-stop semantics are **unchanged**: when `hard_stop_bps` trips, the exit is a **market SELL** by design for guaranteed fills. Normal SELLs still honor `prefer_maker_for_sells=True` for **post-only limit** exits.
 
 ---
 
