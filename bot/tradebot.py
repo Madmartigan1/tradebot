@@ -111,7 +111,7 @@ class TradeBot:
         self.min_ticks_per_product: Dict[str, int] = {}
         self._trend = defaultdict(int)   # -1 below, 0 band, +1 above
         self._primed = set()             # first crossover primes only (no trade)
-        self._pending = {}               # product_id -> {"rel": +/-1, "count": N}
+        self._pending = {}               # product_id -> {"rel": +/-1/0, "count": N}
 
         # Advisors
         self.enable_advisors: bool = bool(getattr(cfg, "enable_advisors", getattr(cfg, "use_advisors", False)))
@@ -125,11 +125,7 @@ class TradeBot:
             for p in self.product_ids
         }
 
-        # confirmation need (candles), with backward-compatible fallback to confirm_ticks
-        self._confirm_need = max(1, int(getattr(self.cfg, "confirm_candles",
-                                 getattr(self.cfg, "confirm_ticks", 2))))
-
-        # One-sided RSI veto: buys require rsi <= rsi_buy_max; sells require rsi >= rsi_sell_min
+        # One-sided RSI/MACD veto settings
         self.advisor_settings = AdvisorSettings(
             enable_rsi=self.enable_advisors,
             rsi_period=int(getattr(self.cfg, "rsi_period", 14)),
@@ -146,13 +142,16 @@ class TradeBot:
             macd_sell_max=float(getattr(self.cfg, "macd_sell_max", 0.0)),
         )
 
+        # Log current settings snapshot (confirm reads live cfg; no cached _confirm_need)
+        cur_conf = int(getattr(self.cfg, "confirm_candles", getattr(self.cfg, "confirm_ticks", 2)))
         logging.info(
-            "Advisors: RSI buy<=%.1f / sell>=%-.1f (period=%d) | MACD %d/%d/%d, thresholds buy>=%.2f bps sell<=%.2f bps | deadband=%.2f bps | confirm=%d",
+            "Advisors: RSI buy<=%.1f / sell>=%-.1f (period=%d) | MACD %d/%d/%d, thresholds buy>=%.2f bps sell<=%.2f bps | "
+            "deadband=%.2f bps | confirm=%d",
             self.advisor_settings.rsi_buy_max, self.advisor_settings.rsi_sell_min, self.advisor_settings.rsi_period,
             self.advisor_settings.macd_fast, self.advisor_settings.macd_slow, self.advisor_settings.macd_signal,
             self.advisor_settings.macd_buy_min, self.advisor_settings.macd_sell_max,
             float(getattr(self.cfg, "ema_deadband_bps", 0.0)),
-            self._confirm_need,
+            cur_conf,
         )
 
         # -------- Candle config / state --------
@@ -481,17 +480,26 @@ class TradeBot:
 
         # Confirmation logic
         if rel == 0:
+            # neutral: don't carry confirmations across flats
             self._pending[product_id] = {"rel": 0, "count": 0}
             return
-        st = self._pending.get(product_id, {"rel": 0, "count": 0})
-        if st.get("rel") == rel:
-            st["count"] += 1
-        else:
+
+        st = self._pending.get(product_id)
+        if not st or st["rel"] != rel:
+            # new direction or first time seeing this product this session
             st = {"rel": rel, "count": 1}
+        else:
+            st["count"] += 1
+
+        # optional cap to keep count bounded in long trends
+        st["count"] = min(st["count"], 32)
         self._pending[product_id] = st
 
-        need = max(1, int(getattr(self, "_confirm_need", 1)))
-        if st["count"] < max(1, need):
+        # dynamic confirms — read live cfg so mid-run AutoTune applies
+        need = max(1, int(getattr(self.cfg, "confirm_candles",
+                          getattr(self.cfg, "confirm_ticks", 2))))
+
+        if st["count"] < need:
             return
 
         # confirmed cross; reset pending
