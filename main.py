@@ -12,7 +12,7 @@ from bot.autotune import autotune_config
 from bot.tradebot import TradeBot
 
 # === Optional: elapsed-time AutoTune refresh (one-time) =================
-AUTOTUNE_ELAPSED_REFRESH_ENABLED = True
+AUTOTUNE_ELAPSED_REFRESH_ENABLED = True     # allow intra-day autotuning
 AUTOTUNE_ELAPSED_REFRESH_HOURS = 4      # re-tune after 4 hours of runtime
 # ========================================================================
 
@@ -39,7 +39,7 @@ def main():
         log.error("Missing COINBASE_API_KEY / COINBASE_API_SECRET in environment.")
         sys.exit(1)
 
-    # --- AUTOTUNE: run BEFORE constructing TradeBot (same as your original) ---
+    # --- AUTOTUNE: run BEFORE constructing TradeBot ---
     if getattr(CONFIG, "autotune_enabled", False):
         try:
             summary = autotune_config(
