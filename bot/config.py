@@ -38,20 +38,20 @@ class BotConfig:
     # Advisors (RSI/MACD)
     enable_advisors: bool = True
     rsi_period: int = 14
-    rsi_buy_max: float = 60.0          # BUY only if RSI ≤ 60
-    rsi_sell_min: float = 40.0         # SELL only if RSI ≥ 40
+    rsi_buy_max: float = 65.0          # BUY only if RSI ≤ 60
+    rsi_sell_min: float = 35.0         # SELL only if RSI ≥ 40
 
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    macd_buy_min: float = +3.0         # BUY only if MACD ≥ +3.0 bps
-    macd_sell_max: float = -3.0        # SELL only if MACD ≤ −3.0 bps
+    macd_buy_min: float = +2.0         # BUY only if MACD ≥ +3.0 bps
+    macd_sell_max: float = -2.0        # SELL only if MACD ≤ −3.0 bps
 
     # Ops / Risk
-    dry_run: bool = True               # Set to False for live trading
+    dry_run: bool = True              # Set to False for live trading
     usd_per_order: float = 30.0
     daily_spend_cap_usd: float = 180.0  # buys stop after cap; sells continue
-    per_product_cooldown_s: int = 900   
+    per_product_cooldown_s: int = 600   
     hard_stop_bps: Optional[int] = 100  # emergency stop loss if asset drops below 1.0%
 
     # Maker/post-only
@@ -105,9 +105,8 @@ class BotConfig:
     # Misc
     lookback_hours: int = 48
     processed_fills_max: int = 10000
-    ema_deadband_bps: float = 8.0
+    ema_deadband_bps: float = 6.0
     log_level: int = logging.INFO
     portfolio_id: Optional[str] = None
 
 CONFIG = BotConfig()
-
