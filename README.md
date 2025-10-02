@@ -1,4 +1,13 @@
 # Tradebot v1.0.1
+[![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
+[![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.13%2B-blue)](requirements.txt)
+![Code size](https://img.shields.io/github/languages/code-size/Madmartigan1/tradebot)
+[![Last commit](https://img.shields.io/github/last-commit/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/commits/main)
+[![Open issues](https://img.shields.io/github/issues/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/issues)
+[![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
+[![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
+
 
 🚀 **Candle-based trading by default**  
 This release marks the transition from tick-driven signals (v1.0.0 and earlier) to **candle closes** (default: 5-minute). Ticks can still be used via local aggregation or config tweaks, but candles are recommended for smoother, less noisy signals.
