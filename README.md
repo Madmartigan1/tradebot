@@ -1,4 +1,4 @@
-# Tradebot v1.0.4
+# Tradebot v1.0.5
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -8,7 +8,7 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-🚀 **Refinements & stability improvements**
+🚀 **Refinements & smarter regime handling**
 
 Tradebot is an automated crypto trading bot for **Coinbase Advanced**.  
 It uses an **EMA crossover** strategy with **RSI/MACD advisors**, plus risk controls like daily caps, cooldowns, and optional stop-loss tolerance.  
@@ -41,24 +41,26 @@ Together, they form a chain of command: **EMA (Captain)** gives orders, **MACD (
 
 ---
 
-## ✨ v1.0.4 Highlights
-- **AutoTune-aware confirmations (no restart):** `confirm_candles` is read from config on every evaluation, so regime changes (e.g., choppy → confirm=4) apply mid-session.
-- **Cleaner confirmation flow:** counters reset on **neutral** bars and on **direction flips**; bounded to keep counts tidy.
-- **Accurate startup log:** advisor banner now prints the live `confirm_candles` value from config (removed stale cache).
-- **AutoTune choppy regime relaxed:** now defaults to the proven v1.0.2 profile during sideways markets:
-  - `confirm_candles=3`, `per_product_cooldown_s=900`
-  - `rsi_buy_max=60`, `rsi_sell_min=40`
-  - `macd_buy_min=+3`, `macd_sell_max=-3`
-  - `ema_deadband_bps=8`
-- **Trend regimes unchanged:** uptrend/downtrend retain v1.0.3 behavior (snappier in strength, stricter in weakness).
-- **Offset sanity bounds:** maker offsets are now clamped within safe floors/ceilings; still nudged ±1 bps based on 3-day stats.
-- **Disabled assets:** in choppy markets, AutoTune no longer disables assets — turnover is preserved.
+## ✨ v1.0.5 Highlights
+- **Hybrid AutoTune regimes (new):**
+  - Snap to strict regime if ≥70% vote share.
+  - Blend winner ↔ Choppy if 55–69% (only sensitivity knobs).
+  - Force Choppy if <55%.
+- **Blended clamps** keep values safe while interpolating.
+- **Enhanced logging:**
+  - Mode (SNAP / BLEND / CHOPPY), vote shares, blend alpha, and global changes printed clearly.
+  - Advisory-only “would disable” products (telemetry only).
+  - Per-product offsets visible after 3-day KPI nudges.
+- **No changes to indicator periods** (RSI/MACD structure stays fixed).
+- **Offsets and floors:** still adaptive ±1 bps per coin, majors protected with lower floors.
 
 ---
 
 ### Upgrade notes
-- If you previously watched a cached `confirm` value in the startup log, it’s now accurate to the **current** config and will reflect any AutoTune initialization.
-- Hard-stop semantics are **unchanged**: when `hard_stop_bps` trips, the exit is a **market SELL** by design for guaranteed fills. Normal SELLs still honor `prefer_maker_for_sells=True` for **post-only limit** exits.
+- You’ll now see **BLEND** logs when the market is ambiguous (55–69% votes).  
+  Example:  
+  - Everything else (bot loop, safety rails, telemetry-only disables) remains unchanged.
+  - Removed final reconcile to avoid redundancy. A fresh reconcile is done on each run.
 
 ---
 
@@ -84,4 +86,3 @@ This bot is intended for educational and experimental purposes only. It is not f
 Always do your own research, monitor your trades, and configure the system to match your risk tolerance.
 Past performance is not indicative of future results. Trade responsibly.
 
-<!-- latest version 2025-09-25T11:16:01 -->
