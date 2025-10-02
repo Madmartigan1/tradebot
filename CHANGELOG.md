@@ -4,7 +4,34 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
-## [v1.0.4] - 2025-09-29
+## [1.0.5] - 2025-10-02
+### Added
+- **Hybrid regime tuning (AutoTune):**
+  - If a regime winner has ≥70% vote share → **snap** to strict regime (uptrend or downtrend).
+  - If winner has 55–69% share → **blend** winner with **Choppy**, only for sensitivity knobs:
+    - `confirm_candles`, `per_product_cooldown_s`
+    - `rsi_buy_max`, `rsi_sell_min`
+    - `macd_buy_min`, `macd_sell_max`
+    - `ema_deadband_bps`
+  - <55% → force **Choppy** (safe fallback).
+- **Blended clamps:** conservative bounds ensure interpolated values stay in safe ranges.
+- **Detailed AutoTune logging:**
+  - Shows regime, mode (SNAP / BLEND / CHOPPY), winner, share, alpha (blend factor), and knob changes.
+  - Advisory-only list of “would disable” products (still not enforced).
+  - Per-product offset map after 3-day KPI nudges.
+
+### Changed
+- **main.py** now logs AutoTune results at startup and on the elapsed 4-hour refresh thread.
+- **autotune.py** updated to v1.0.5 hybrid mixer (replacing winner-take-all logic).
+
+### Notes
+- **Indicator periods remain static** (RSI/MACD structure untouched).
+- **Product disabling stays telemetry-only**; nothing is actually turned off.
+- **Offsets**: still nudged ±1 bps based on last 3-day stats, with tiered floors for majors.
+
+
+
+## [v1.0.4] - 2025-09-26
 ### Changed
 - **Dynamic confirmations:** `tradebot.py` now reads `confirm_candles` directly from live config on every signal check, so **AutoTune** updates (e.g., 3→4 in choppy) take effect **mid-run** without a restart.
 - **Confirmation hygiene:** counters **reset on neutral** (deadband) bars and on **direction flips**; counter is lightly **bounded** to avoid runaway growth in long trends.
