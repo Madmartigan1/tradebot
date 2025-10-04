@@ -562,7 +562,7 @@ class TradeBot:
         side = "BUY" if signal > 0 else "SELL"
         if side == "BUY" and remaining <= 0:
             if not self.daily_cap_reached_logged:
-                logging.info("Daily BUY cap reached (%.2f). Skipping further BUYs.", daily_cap)
+                logging.info("\n***Daily BUY cap reached (%.2f). Skipping further BUYs.***\n", daily_cap)
                 self.log_session_pnl()
                 self.daily_cap_reached_logged = True
                 self.session_footer_written = True
