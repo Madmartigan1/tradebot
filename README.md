@@ -1,4 +1,4 @@
-# Tradebot v1.0.5
+# Tradebot v1.0.6
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -9,11 +9,11 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-🚀 **Refinements & smarter regime handling**
+⚖️ **Sharper thresholds, safer cooldowns**
 
 Tradebot is an automated crypto trading bot for **Coinbase Advanced**.  
 It uses an **EMA crossover** strategy with **RSI/MACD advisors**, plus risk controls like daily caps, cooldowns, and optional stop-loss tolerance.  
-By default, it now runs on **candle closes** (5-minute interval, `confirm_candles=3`).
+By default, it runs on **5-minute candles** with `confirm_candles=3`.
 
 ---
 
@@ -42,7 +42,7 @@ Together, they form a chain of command: **EMA (Captain)** gives orders, **MACD (
 
 ---
 
-## ✨ v1.0.5 Highlights
+## ✨ v1.0.6 Highlights
 - **Hybrid AutoTune regimes (new):**
   - Snap to strict regime if ≥70% vote share.
   - Blend winner ↔ Choppy if 55–69% (only sensitivity knobs).
@@ -53,16 +53,25 @@ Together, they form a chain of command: **EMA (Captain)** gives orders, **MACD (
   - Advisory-only “would disable” products (telemetry only).
   - Per-product offsets visible after 3-day KPI nudges.
 - **No changes to indicator periods** (RSI/MACD structure stays fixed).
-- **Offsets and floors:** still adaptive ±1 bps per coin, majors protected with lower floors.
+- **Golden Choppy profile**:
+  - `RSI` relaxed to 35/65 to cut down whipsaws.  
+  - `MACD` tightened to ±2.0 bps.  
+  - Cooldown reduced to 600s for more opportunities.
+- **Trending regimes**:
+  - Uptrend remains aggressive with 420s cooldown.  
+  - Downtrend slowed to 900s cooldown to reduce false entries.  
+- **Improved visibility:** Daily BUY cap message is now bracketed with newlines for better log visibility.
 
 ---
 
 ### Upgrade notes
+- Ensure `.state/portfolio.json` is copied forward between versions so lifetime P&L remains accurate.
+- Pruning `trades.csv` is optional; if you prune, `portfolio.json` should be treated as the long-term source of truth.
 - You’ll now see **BLEND** logs when the market is ambiguous (55–69% votes).  
   Example:  
   - Everything else (bot loop, safety rails, telemetry-only disables) remains unchanged.
   - Removed final reconcile to avoid redundancy. A fresh reconcile is done on each run.
-
+  
 ---
 
 ## 🔐 Secrets

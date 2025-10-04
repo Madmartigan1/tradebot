@@ -9,12 +9,15 @@ class BotConfig:
     product_ids: List[str] = field(default_factory=lambda: [
         "ETH-USD","XRP-USD","ADA-USD","ATOM-USD","ALGO-USD","XLM-USD","HBAR-USD", "FIL-USD",
         "NEAR-USD","SOL-USD","DOGE-USD","AVAX-USD","LINK-USD","SUI-USD","LTC-USD","CRO-USD",
-        "DOT-USD","ARB-USD", "IP-USD", "WLFI-USD", "FLOKI-USD", "TOSHI-USD",
+        "DOT-USD","ARB-USD", "IP-USD", "WLFI-USD", "FLOKI-USD", "PEPE-USD",
     ])
+    
+    # Dry run used for paper trading. Set to False for live trading
+    dry_run: bool = True         
 
     # --- v1.0.3: Autotune (startup-only) ---
     autotune_enabled: bool = True
-    autotune_preview_only: bool = True       # first time run set True: preview only (no changes applied)
+    autotune_preview_only: bool = False      # (optional)first time run set True: preview only (no changes applied)
     autotune_lookback_hours: int = 18        # bump to 24–72h if you skipped days
 
     # --- v1.0.3: Reconciliation during the session ---
@@ -48,10 +51,9 @@ class BotConfig:
     macd_sell_max: float = -2.0        # SELL only if MACD ≤ −3.0 bps
 
     # Ops / Risk
-    dry_run: bool = True              # Set to False for live trading
     usd_per_order: float = 30.0
     daily_spend_cap_usd: float = 180.0  # buys stop after cap; sells continue
-    per_product_cooldown_s: int = 600   
+    per_product_cooldown_s: int = 600   # Wait time in seconds, per coin, before it trades again
     hard_stop_bps: Optional[int] = 100  # emergency stop loss if asset drops below 1.0%
 
     # Maker/post-only
@@ -61,7 +63,7 @@ class BotConfig:
 
     maker_offset_bps_per_product: Dict[str, float] = field(default_factory=lambda: {
         # Tier A / very active — trimmed 2 bps
-        "ETH-USD":16.0, "SOL-USD":18.0, "LINK-USD":18.0, "XRP-USD":20.0, "DOGE-USD":18.0, "LTC-USD":20.0,
+        "ETH-USD":16.0, "SOL-USD":18.0, "LINK-USD":18.0, "XRP-USD":20.0, "DOGE-USD":20.0, "LTC-USD":20.0,
 
         # Tier B — light trim where fills lagged; others unchanged
         "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":26.0, "NEAR-USD":20.0, "ATOM-USD":26.0,
@@ -70,7 +72,7 @@ class BotConfig:
         "ALGO-USD":22.0, "XLM-USD":20.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0,
 
         # Other altcoins(EXPERIMENTAL)
-        "IP-USD":22.0, "WLFI-USD":22.0, "FLOKI-USD":26.0, "TOSHI-USD":28.0,
+        "IP-USD":22.0, "WLFI-USD":22.0, "FLOKI-USD":26.0, "PEPE-USD":28.0,  
     })
 
 

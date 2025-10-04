@@ -4,7 +4,25 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
-## [1.0.5] - 2025-10-02
+## [1.0.6] - 2025-10-04
+### Changed
+- **Golden Choppy presets:** Adjusted RSI, MACD, and cooldown thresholds for more effective trading in sideways/choppy conditions:
+  - `rsi_buy_max=65`, `rsi_sell_min=35`
+  - `macd_buy_min=+2.0`, `macd_sell_max=-2.0`
+  - `per_product_cooldown_s=600`
+- **Uptrend/downtrend refinements:** 
+  - Uptrend cooldown kept tighter (`420s`) to participate early.
+  - Downtrend cooldown raised to `900s` for safety, reducing over-trading in weak markets.
+- **Logging polish:** Daily BUY cap notification now prints with blank lines before/after (`\n`) to stand out more clearly in logs.
+
+### Notes
+- EMA parameters unchanged (40/120 baseline).  
+- Indicator periods remain static; only thresholds and cooldowns adjusted.  
+- Lifetime P&L continues to be read from `portfolio.json`. Ensure `.state` is copied forward between versions.
+
+
+
+## [1.0.5] - 2025-09-29
 ### Added
 - **Hybrid regime tuning (AutoTune):**
   - If a regime winner has ≥70% vote share → **snap** to strict regime (uptrend or downtrend).
@@ -95,7 +113,6 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
 
-
 ## [v1.0.1] - 2025-09-18
 ### Added
 - **Candle-based trading mode** (default **5m**): supports WS candles or **local aggregation** from ticker; warm-up/backfill and `confirm_candles=3`.
@@ -142,7 +159,6 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - Env template unchanged (`APIkeys.env.example` should be updated by each user locally).
 - `.state/` files still local-only and ignored by Git.
 - Advisors can be tuned via `strategy.py` or config thresholds.
-
 
 
 
