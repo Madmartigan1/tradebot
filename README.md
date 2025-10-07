@@ -36,7 +36,7 @@ To make the strategy easier to visualize:
   
 - **Quartermaster → Take-Profit & Stagnation Officer**  
   The Quartermaster safeguards the fleet’s earnings and tidiness.  
-  - **Take-Profit (6%)**: When profits reach a safe margin, the Quartermaster locks the cargo and sends the ship home — a quick market exit.  
+  - **Take-Profit (6%+)**: When profits reach a safe margin, the Quartermaster locks the cargo and sends the ship home — a quick market exit.  
 
 - **Deckhand (24 h, ±2%)**: The “broom” that sweeps idle trades off the deck when they drift aimlessly without momentum, keeping the decks lean and ready for action.
   This ensures capital is recycled efficiently while the Captain (EMA) and Advisors (RSI/MACD) focus on live opportunities.
