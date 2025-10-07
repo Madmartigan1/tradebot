@@ -33,7 +33,8 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
   Candles are now sorted by timestamp (`start`/`time`) to prevent out-of-order history from Coinbase API responses.
 - **Maker vs Market policy:**  
 - Normal EMA/RSI/MACD trades continue to use maker (limit) orders; Quartermaster exits always use market for decisive execution.
-
+- Added a one-shot, elapsed-time AutoTune thread that reuses the live bot’s authenticated REST client (no extra keys/clients) and restores original lookback after running.
+- Improved Ctrl+C handling — sets a global shutdown flag so background threads exit cleanly, calls bot.close(), then terminates gracefully.
 
 ### Notes
 - Dry-run mode still skips real fills, so KPI data will remain empty during paper sessions (guarded to prevent noise).
