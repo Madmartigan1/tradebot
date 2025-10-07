@@ -78,8 +78,14 @@ def _load_keys_from_envfile():
     return api_key, api_secret, portfolio_id
 
 
-def _elapsed_autotune_once():
-    logger = logging.getLogger("tradebot.autotune-elapsed")
+def _elapsed_autotune_once_with_bot(bot: TradeBot):
+    """
+    One-shot AutoTune run after AUTOTUNE_ELAPSED_REFRESH_HOURS, reusing the
+    existing authenticated REST client from the running TradeBot instance.
+    """
+    logger = logging.getLogger("autotune")
+
+    # Respect global enable flag
     try:
         from bot.autotune import autotune_config as _ac
     except Exception:
@@ -87,6 +93,7 @@ def _elapsed_autotune_once():
     if _ac is None or not getattr(CONFIG, "autotune_enabled", False):
         return
 
+    # Wait until the elapsed window passes (but allow clean shutdown)
     target_sec = int(AUTOTUNE_ELAPSED_REFRESH_HOURS * 3600)
     step = 5
     while not _shutdown_once.is_set():
@@ -94,39 +101,42 @@ def _elapsed_autotune_once():
             break
         time.sleep(step)
 
+    # Temporary lookback override (optional)
+    _orig_lb = getattr(CONFIG, "autotune_lookback_hours", 18)
+    _elapsed_lb = getattr(CONFIG, "elapsed_autotune_lookback_hours", _orig_lb)
+
     try:
-        # --- begin temporary 6h lookback override for elapsed re-tune ---
-        _orig_lb = getattr(CONFIG, "autotune_lookback_hours", 18)
-        _elapsed_lb = getattr(CONFIG, "elapsed_autotune_lookback_hours", _orig_lb)
         setattr(CONFIG, "autotune_lookback_hours", _elapsed_lb)
 
+        logger.info("AUTOTUNE (elapsed): starting one-shot update…")
         summary = _ac(
             CONFIG,
-            api_key=api_key,
-            api_secret=api_secret,
-            portfolio_id=portfolio_id,
+            # Reuse the live bot’s REST client (no new keys, no extra client)
+            rest=bot.rest,
+            logger=logger,
             preview_only=getattr(CONFIG, "autotune_preview_only", True),
         )
+        logger.info(
+            "AUTOTUNE(elapsed %dh using %dh lookback): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
+            AUTOTUNE_ELAPSED_REFRESH_HOURS,
+            _elapsed_lb,
+            summary.get("mode"),
+            summary.get("portfolio_regime"),
+            summary.get("winner"),
+            float(summary.get("share") or 0.0),
+            float(summary.get("alpha") or 0.0),
+        )
+        logger.info("AUTOTUNE(elapsed) votes: %s", summary.get("portfolio_vote"))
+        logger.info("AUTOTUNE(elapsed) knob changes: %s", summary.get("global_changes"))
+        logger.info("AUTOTUNE(elapsed) offsets (post 3d KPI nudges): %s", summary.get("offsets_changed"))
+        if summary.get("disabled_products"):
+            logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s", summary.get("disabled_products"))
+        logger.info("AUTOTUNE (elapsed): complete.")
+    except Exception as e:
+        logger.exception("AUTOTUNE (elapsed) failed: %s", e)
     finally:
-        # always restore the original startup lookback
+        # Always restore original lookback
         setattr(CONFIG, "autotune_lookback_hours", _orig_lb)
-
-    logger.info(
-        "AUTOTUNE(elapsed %dh using %dh lookback): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
-        AUTOTUNE_ELAPSED_REFRESH_HOURS,
-        _elapsed_lb,
-        summary.get("mode"),
-        summary.get("portfolio_regime"),
-        summary.get("winner"),
-        float(summary.get("share") or 0.0),
-        float(summary.get("alpha") or 0.0),
-    )
-    logger.info("AUTOTUNE(elapsed) votes: %s", summary.get("portfolio_vote"))
-    logger.info("AUTOTUNE(elapsed) knob changes: %s", summary.get("global_changes"))
-    logger.info("AUTOTUNE(elapsed) offsets (post 3d KPI nudges): %s", summary.get("offsets_changed"))
-    if summary.get("disabled_products"):
-        logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s", summary.get("disabled_products"))
-
 
 
 def main():
@@ -190,6 +200,16 @@ def main():
     # 3) Open websocket + subscribe (prints “Subscribed … / WS ready”)
     bot.open()
 
+    # after you’ve constructed `bot = TradeBot(CONFIG, api_key, api_secret, portfolio_id)`
+    if AUTOTUNE_ELAPSED_REFRESH_ENABLED and getattr(CONFIG, "autotune_enabled", False):
+        t = threading.Thread(
+            target=_elapsed_autotune_once_with_bot,
+            args=(bot,),                      # pass the running bot explicitly
+            name="autotune-elapsed",
+            daemon=True,
+        )
+        t.start()
+
     # --- Mid-session reconcile (restores v1.0.4 behavior) ---
     if getattr(CONFIG, "mid_reconcile_enabled", True):
 
@@ -218,15 +238,12 @@ def main():
 
         threading.Thread(target=_periodic_reconcile, daemon=True, name="mid_reconcile").start()
 
-    # 4) Optional elapsed-time re-tune
-    if AUTOTUNE_ELAPSED_REFRESH_ENABLED and getattr(CONFIG, "autotune_enabled", False):
-        threading.Thread(target=_elapsed_autotune_once, daemon=True, name="elapsed_autotune").start()
-
-    # 5) Blocking WS loop — Windows-friendly Ctrl+C
+    # Blocking WS loop — Windows-friendly Ctrl+C
     try:
         bot.run_ws_forever()
     except KeyboardInterrupt:
         logging.getLogger("tradebot").info("Ctrl+C pressed; shutting down...")
+        _shutdown_once.set()               # <— make background threads exit promptly
         try:
             if hasattr(bot, "close"):
                 bot.close()
