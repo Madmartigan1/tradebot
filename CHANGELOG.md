@@ -4,6 +4,46 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
+## [1.0.7] - 2025-10-07
+### Added
+- **Regime voting decoupled from trading candles:**
+  - New `autotune_vote_interval` (default `15m`) allows market regime detection on higher timeframe while trading stays on `5m`.
+  - `autotune_vote_min_candles` ensures enough samples for accurate voting (default `72` = ~18h on 15m candles).
+- **KPI-aware telemetry:**
+  - AutoTune now runs **after** portfolio reconciliation, so advisory lists reflect real 3-day trade performance instead of always showing `no_kpi`.
+  - Each advisory entry now includes a short reason, e.g.  
+    `inactive_3d`, `no_kpi`, or `neg_pnl_3d_bps=-12.5,trades=5`.
+- **Improved offset logging:**  
+  - Per-product offsets (`maker_offset_bps_per_product`) now always print clearly after KPI nudges.
+- **Quartermaster module (take-profit + stagnation logic):**
+  - New 6 % take-profit band triggers a market SELL once unrealized P&L ≥ 600 bps.
+  - 24-hour stagnation rule (“the broom”) closes flat trades (|P&L| < 2 %) with near-zero MACD momentum.
+  - Quartermaster acts before EMA crossover logic; all exits are logged with `exit_reason` (`take_profit`, `stagnation`).
+- **Trade tagging & CSV logging:**
+  - Each trade now records `entry_reason` / `exit_reason`, `hold_time_sec`, fees, liquidity, and per-fill P&L.
+  - Dry-run mode suppresses writes for hygiene.
+
+
+### Changed
+- **Startup order:**  
+  Startup sequence now performs reconcile → AutoTune → WebSocket subscribe for accurate telemetry and consistent initialization.
+- **Voting logic:**  
+  Uses dedicated vote interval/timeframe; ensures regime votes (e.g. uptrend/choppy/downtrend) are based on the proper granularity.
+- **Candle fetch:**  
+  Candles are now sorted by timestamp (`start`/`time`) to prevent out-of-order history from Coinbase API responses.
+- **Maker vs Market policy:**  
+- Normal EMA/RSI/MACD trades continue to use maker (limit) orders; Quartermaster exits always use market for decisive execution.
+
+
+### Notes
+- Dry-run mode still skips real fills, so KPI data will remain empty during paper sessions (guarded to prevent noise).
+- Live sessions automatically populate KPI telemetry after a few fills.
+- Indicator structures (EMA/RSI/MACD) remain unchanged; all tuning logic purely affects strategy sensitivity and reporting.
+- The 24 h stagnation rule applies globally across all assets.  
+- `lookback_hours = 120` recommended for multi-session daily runs to rebuild hold-time accuracy.
+
+
+
 ## [1.0.6] - 2025-10-04
 ### Changed
 - **Golden Choppy presets:** Adjusted RSI, MACD, and cooldown thresholds for more effective trading in sideways/choppy conditions:
