@@ -1,3 +1,4 @@
+# ----v1.0.7----
 # bot/config.py
 import logging
 from dataclasses import dataclass, field
@@ -13,13 +14,55 @@ class BotConfig:
     ])
     
     # Dry run used for paper trading. Set to False for live trading
-    dry_run: bool = True         
+    dry_run: bool = False         
 
     # --- v1.0.3: Autotune (startup-only) ---
     autotune_enabled: bool = True
     autotune_preview_only: bool = False      # (optional)first time run set True: preview only (no changes applied)
-    autotune_lookback_hours: int = 18        # bump to 24–72h if you skipped days
-
+    
+    # ======================================================================================
+    # How many hours of historical FILL data to sync during portfolio reconciliation.
+    # - Used at: startup, periodic mid-session sweeps, and right-before SELL (guard).
+    # - Affects ONLY portfolio/PNL/KPI backfill — NOT candles/indicators/AutoTune.
+    # - Mid-session/on-demand reconcile is clamped to 6–48h for safety:
+    #     effective_hours = min(48, max(6, lookback_hours))
+    # - Startup reconcile is NOT clamped and will honor the full value.
+    lookback_hours: int = 48
+    # ======================================================================================
+    
+    # =====================================================================================
+    # Regime vote lookback (used only for AutoTune’s regime voting; trading stays on 5m).
+    # With vote interval = 15m, the effective vote window is:
+    #   hours_used_for_vote = max(autotune_lookback_hours,
+    #                             ceil(autotune_vote_min_candles * 15min))
+    # We changed the detector’s minimum to require ≥120 candles (EMA long = 120),
+    # so 36h ≈ 144×15m satisfies the requirement and yields non-choppy classifications.
+    # If you skip 2–3 days and want (not really necessary for a fresh start) the vote to span ~48–72h, temporarily bump this to 48–72.
+    # (You can leave autotune_vote_min_candles at 144 to “lock” a 36h window, or raise it to force a larger window.)
+    autotune_lookback_hours: int = 36         
+    # =====================================================================================
+    
+    # --- Regime voting (decoupled from trading candles) ---
+    # Use a dedicated timeframe for market regime voting (does NOT change trading candles)
+    autotune_vote_interval: str = "15m"
+    # Minimum number of vote candles required; at 15m, 144 candles ≈ 36 hours.
+    # Effective voting window:
+    #   hours_used_for_vote = max(autotune_lookback_hours,
+    #                             ceil(autotune_vote_min_candles * interval_seconds / 3600))
+    autotune_vote_min_candles: int = 144
+    # ------------------------------------------------------
+    
+    # Elapsed re-tune lookback (fires hours after bot start; see main.py)
+    elapsed_autotune_lookback_hours: int = 6
+    
+    # Quartermaster exits
+    enable_quartermaster = True
+    take_profit_bps = 600          # 6%
+    max_hold_hours = 24            # ⟵ was 48; now 24h
+    stagnation_close_bps = 200     # 2%
+    flat_macd_abs_max = 0.40
+    quartermaster_respect_macd = True
+    
     # --- v1.0.3: Reconciliation during the session ---
     mid_reconcile_enabled: bool = True
     mid_reconcile_interval_minutes: int = 60  # hourly sweep
@@ -52,7 +95,7 @@ class BotConfig:
 
     # Ops / Risk
     usd_per_order: float = 30.0
-    daily_spend_cap_usd: float = 180.0  # buys stop after cap; sells continue
+    daily_spend_cap_usd: float = 240.0  # buys stop after cap; sells continue
     per_product_cooldown_s: int = 600   # Wait time in seconds, per coin, before it trades again
     hard_stop_bps: Optional[int] = 100  # emergency stop loss if asset drops below 1.0%
 
@@ -101,11 +144,28 @@ class BotConfig:
     #})
     # --------------------------------------------------------------------------------------------------------------------
 
+    # --- Quartermaster exits (take-profit & time-in-trade) ---
+    enable_quartermaster: bool = True
+
+    # Take-profit band: sell if unrealized PnL ≥ this many bps (6% = 600 bps)
+    take_profit_bps: int = 600
+
+    # Time-in-trade “stagnation” exit:
+    # If the position has been open ≥ this many hours AND |PnL| < stagnation_close_bps
+    # AND MACD is ~flat, then close it to free capital.
+    max_hold_hours: int = 24
+    stagnation_close_bps: int = 200            # 2% band
+    flat_macd_abs_max: float = 0.40            # “flat” MACD histogram threshold
+
+    # Veto policy when quartermaster fires:
+    #   - RSI veto is ignored (we’re taking profits or freeing capital, not chasing)
+    #   - Optional MACD veto (keep it True to still avoid selling INTO strong momentum)
+    quartermaster_respect_macd: bool = True
+
     # Disable per-coin EMA overrides for “global” behavior
     ema_params_per_product: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
     # Misc
-    lookback_hours: int = 48
     processed_fills_max: int = 10000
     ema_deadband_bps: float = 6.0
     log_level: int = logging.INFO
