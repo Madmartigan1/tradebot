@@ -1,4 +1,9 @@
-# bot/tradebot.py
+# bot/tradebot.py — v1.0.7
+# Adds:
+#  - Quartermaster exits (6% take-profit; time-in-trade stagnation)
+#  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
+#  - Non-invasive pre-check before EMA captain logic
+
 import json
 import logging
 import time
@@ -44,6 +49,7 @@ class CandleBuilder:
         self.v = 0.0
         return closed  # (start, open, high, low, close, volume)
 
+
 def _parse_ws_iso(ts: str | None) -> float:
     """Parse ISO8601 '...Z' string to epoch seconds; fallback to time.time()."""
     if not ts:
@@ -53,12 +59,50 @@ def _parse_ws_iso(ts: str | None) -> float:
     except Exception:
         return time.time()
 
+
 def _granularity_enum(gran_sec: int) -> str:
     mapping = {
         60: "ONE_MINUTE", 300: "FIVE_MINUTE", 900: "FIFTEEN_MINUTE", 1800: "THIRTY_MINUTE",
         3600: "ONE_HOUR", 7200: "TWO_HOUR", 14400: "FOUR_HOUR", 21600: "SIX_HOUR", 86400: "ONE_DAY",
     }
     return mapping.get(int(gran_sec), "FIVE_MINUTE")
+
+# --- Quartermaster helpers ---
+
+def _profit_bps(entry_price: float, last_price: float) -> float:
+    if not entry_price or not last_price or entry_price <= 0 or last_price <= 0:
+        return 0.0
+    return (last_price / entry_price - 1.0) * 10_000.0
+
+
+def _quartermaster_exit_ok(cfg, last_price: float, entry_price: float,
+                           hold_hours: float, macd_hist: float | None) -> tuple[bool, str]:
+    """
+    Returns (should_exit, reason): reason ∈ {"take_profit","stagnation"}
+    """
+    if not getattr(cfg, "enable_quartermaster", True):
+        return False, ""
+
+    pbps = _profit_bps(entry_price, last_price)
+
+    # 1) Take-profit band (default 600 bps = 6%)
+    if pbps >= float(getattr(cfg, "take_profit_bps", 600)):
+        if getattr(cfg, "quartermaster_respect_macd", True):
+            flat_max = float(getattr(cfg, "flat_macd_abs_max", 0.40))
+            if macd_hist is not None and macd_hist > flat_max:
+                # still strong up momentum → let EMA captain handle it
+                return False, ""
+        return True, "take_profit"
+
+    # 2) Time-in-trade stagnation cull
+    if hold_hours >= float(getattr(cfg, "max_hold_hours", 48)):
+        if abs(pbps) < float(getattr(cfg, "stagnation_close_bps", 200)):
+            flat_max = float(getattr(cfg, "flat_macd_abs_max", 0.40))
+            if macd_hist is None or abs(macd_hist) <= flat_max:
+                return True, "stagnation"
+
+    return False, ""
+
 
 from .utils import (
     PNL_DECIMALS,
@@ -80,6 +124,14 @@ class TradeBot:
     def __init__(self, cfg, api_key: str, api_secret: str, portfolio_id: Optional[str] = None):
         self.cfg = cfg
         self.portfolio_id = portfolio_id if portfolio_id is not None else getattr(cfg, "portfolio_id", None)
+
+        # Core per-product state
+        self.ticks: Dict[str, int] = defaultdict(int)  # counts candles in candle mode
+        self.min_ticks_per_product: Dict[str, int] = {}
+        self._trend = defaultdict(int)   # -1 below, 0 band, +1 above
+        self._primed = set()             # first crossover primes only (no trade)
+        self._pending = {}               # product_id -> {"rel": +/-1/0, "count": N}
+        self._qm_last_ts = defaultdict(float)  # last time Quartermaster SELL fired per product
 
         # Thread locking to prevent races in state + CSV writes
         self._state_lock = threading.RLock()
@@ -107,11 +159,6 @@ class TradeBot:
         # Indicators and per-product params
         self.short: Dict[str, EMA] = {}
         self.long: Dict[str, EMA] = {}
-        self.ticks: Dict[str, int] = defaultdict(int)  # counts candles in candle mode
-        self.min_ticks_per_product: Dict[str, int] = {}
-        self._trend = defaultdict(int)   # -1 below, 0 band, +1 above
-        self._primed = set()             # first crossover primes only (no trade)
-        self._pending = {}               # product_id -> {"rel": +/-1/0, "count": N}
 
         # Advisors
         self.enable_advisors: bool = bool(getattr(cfg, "enable_advisors", getattr(cfg, "use_advisors", False)))
@@ -354,13 +401,17 @@ class TradeBot:
                           size: float, price: float, fee: float | None,
                           liquidity: str | None, pnl: float | None,
                           position_after: float | None, cost_basis_after: float | None,
-                          intent_price: float | None, hold_time_sec: float | None):
+                          intent_price: float | None, hold_time_sec: float | None,
+                          entry_reason: str | None = None, exit_reason: str | None = None):
         try:
             from .constants import TRADES_CSV_FILE
         except Exception:
             return
-        headers = ["ts","order_id","side","product","size","price","quote_usd","fee","liquidity",
-                   "pnl","position_after","cost_basis_after","intent_price","slippage_abs","slippage_bps","hold_time_sec"]
+        headers = [
+            "ts","order_id","side","product","size","price","quote_usd","fee","liquidity",
+            "pnl","position_after","cost_basis_after","intent_price","slippage_abs","slippage_bps",
+            "hold_time_sec","entry_reason","exit_reason"
+        ]
         quote_usd = (size * price) if (size is not None and price is not None) else None
         slippage_abs = None
         slippage_bps = None
@@ -383,7 +434,8 @@ class TradeBot:
                f"{intent_price:.8f}" if intent_price is not None else "",
                f"{slippage_abs:.8f}" if slippage_abs is not None else "",
                f"{slippage_bps:.4f}" if slippage_bps is not None else "",
-               f"{hold_time_sec:.2f}" if hold_time_sec is not None else ""]
+               f"{hold_time_sec:.2f}" if hold_time_sec is not None else "",
+               (entry_reason or ""), (exit_reason or "")]
         try:
             path = TRADES_CSV_FILE
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -573,7 +625,8 @@ class TradeBot:
             notional = min(notional, remaining)
 
         try:
-            self.place_order(product_id, side=side, quote_usd=notional, last_price=price)
+            # EMA captain path — tag reason explicitly
+            self.place_order(product_id, side=side, quote_usd=notional, last_price=price, reason="ema_cross")
         except Exception as e:
             logging.exception("Order error for %s: %s", product_id, e)
 
@@ -627,7 +680,7 @@ class TradeBot:
         except Exception as e:
             return False, e
 
-    def place_order(self, product_id: str, side: str, quote_usd: float, last_price: float):
+    def place_order(self, product_id: str, side: str, quote_usd: float, last_price: float, reason: str = "ema_cross"):
         side = side.upper()
         assert side in {"BUY", "SELL"}
 
@@ -642,13 +695,17 @@ class TradeBot:
             else:
                 self.session_cash_pnl += quote_usd
             self.last.stamp(product_id)
-            logging.info("[DRY RUN] %s %s $%.2f", side, product_id, quote_usd)
+            logging.info("[DRY RUN] %s %s $%.2f (reason=%s)", side, product_id, quote_usd, reason)
             return
 
         # Side-aware maker preference
         prefer_maker = bool(getattr(self.cfg, "prefer_maker", True))
         if side == "SELL":
             prefer_maker = bool(getattr(self.cfg, "prefer_maker_for_sells", prefer_maker))
+
+        # Quartermaster exits must execute immediately: force MARKET SELL
+        if side == "SELL" and reason in ("take_profit", "stagnation", "stop_loss"):
+            prefer_maker = False
 
         if prefer_maker:
             q = self.quotes.get(product_id, {})
@@ -688,9 +745,9 @@ class TradeBot:
 
         try:
             body = getattr(resp, "to_dict", lambda: resp)()
-            logging.info("Live %s %s $%.2f placed. Resp: %s", side, product_id, quote_usd, body)
+            logging.info("Live %s %s $%.2f placed. Resp: %s (reason=%s)", side, product_id, quote_usd, body, reason)
         except Exception:
-            logging.info("Live %s %s $%.2f placed.", side, product_id, quote_usd)
+            logging.info("Live %s %s $%.2f placed. (reason=%s)", side, product_id, quote_usd, reason)
 
         # best-effort immediate fills -> update portfolio
         try:
@@ -707,6 +764,7 @@ class TradeBot:
                     "intent_price": float(last_price) if last_price else None,
                     "bid": q.get("bid"),
                     "ask": q.get("ask"),
+                    "reason": reason,  # NEW — propagate exit/entry reason to CSV later
                 }
             except Exception:
                 pass
@@ -760,6 +818,9 @@ class TradeBot:
                             oid = str(order_id) if order_id else None
                             intent = self._intent.get(oid, {})
                             intent_price = intent.get("intent_price")
+                            reason_val = (intent.get("reason") or "")
+                            entry_reason = reason_val if side_f == "BUY" else ""
+                            exit_reason  = reason_val if side_f == "SELL" else ""
                             pnl_fill = None
                             if side_f == "SELL":
                                 try:
@@ -783,7 +844,8 @@ class TradeBot:
                                                    liquidity=flag, pnl=pnl_fill,
                                                    position_after=self.positions.get(pid_f),
                                                    cost_basis_after=self.cost_basis.get(pid_f),
-                                                   intent_price=intent_price, hold_time_sec=hold_time_sec)
+                                                   intent_price=intent_price, hold_time_sec=hold_time_sec,
+                                                   entry_reason=entry_reason, exit_reason=exit_reason)
                         except Exception as e:
                             logging.debug("CSV log (immediate) failed: %s", e)
 
@@ -845,7 +907,7 @@ class TradeBot:
         params = {
             "start_date": start.isoformat().replace("+00:00", "Z"),
             "end_date": end.isoformat().replace("+00:00", "Z"),
-            "limit": 100,
+            "limit": 200,
         }
         try:
             resp = self.rest.get("/api/v3/brokerage/orders/historical/fills", params=params)
@@ -902,6 +964,9 @@ class TradeBot:
                     oid = f.get("order_id")
                     intent = self._intent.get(str(oid), {}) if oid else {}
                     intent_price = intent.get("intent_price")
+                    reason_val = (intent.get("reason") or "")
+                    entry_reason = reason_val if side == "BUY" else ""
+                    exit_reason  = reason_val if side == "SELL" else ""
                     pnl_fill = None
                     if side == "SELL":
                         try:
@@ -925,7 +990,8 @@ class TradeBot:
                                            liquidity=f.get("liquidity_indicator"), pnl=pnl_fill,
                                            position_after=self.positions.get(pid),
                                            cost_basis_after=self.cost_basis.get(pid),
-                                           intent_price=intent_price, hold_time_sec=hold_time_sec)
+                                           intent_price=intent_price, hold_time_sec=hold_time_sec,
+                                           entry_reason=entry_reason, exit_reason=exit_reason)
                 except Exception as e:
                     logging.debug("CSV log (reconcile) failed: %s", e)
 
@@ -955,6 +1021,42 @@ class TradeBot:
             self._macd[product_id].update(close_price)
             self._rsi[product_id].update(close_price)
         self.ticks[product_id] += 1  # now counts candles
+
+        # ---- Quartermaster pre-check (take-profit / time-in-trade) ----
+        try:
+            held_qty = max(0.0, float(self.positions.get(product_id, 0.0)))
+            if held_qty > 0.0:
+                entry_price = float(self.cost_basis.get(product_id, 0.0) or 0.0)
+                macd_hist = self._macd[product_id].hist if self.enable_advisors else None
+                entry_ts = self._entry_time.get(product_id)
+                hold_hours = 0.0
+                if entry_ts:
+                    hold_hours = max(0.0, (time.time() - float(entry_ts)) / 3600.0)
+
+                qm_ok, qm_reason = _quartermaster_exit_ok(
+                    self.cfg, last_price=close_price, entry_price=entry_price,
+                    hold_hours=hold_hours, macd_hist=macd_hist
+                )
+                if qm_ok:
+                    # cooldown + throttle + dust guard
+                    cooldown_s = int(getattr(self.cfg, "per_product_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
+                    now_ts = time.time()
+                    if not self.last.ok(product_id, cooldown_s):
+                        return
+                    if now_ts - float(self._qm_last_ts[product_id] or 0.0) < min(60, cooldown_s):
+                        return
+                    min_base = float(self.base_inc.get(product_id, 1e-8))
+                    if held_qty < (min_base * 0.99):
+                        return
+
+                    quote_usd = held_qty * close_price
+                    self.place_order(product_id, side="SELL", quote_usd=quote_usd,
+                                     last_price=close_price, reason=qm_reason)
+                    self._qm_last_ts[product_id] = now_ts
+                    return  # one decisive action per candle per product
+        except Exception as _e:
+            logging.debug("Quartermaster check failed for %s: %s", product_id, _e)
+
         min_needed = self.min_ticks_per_product.get(product_id, int(getattr(self.cfg, "min_candles", getattr(self.cfg, "min_ticks", 60))))
         if self.ticks[product_id] >= min_needed and s is not None and l is not None:
             self.evaluate_signal(product_id, close_price, s, l)
@@ -967,7 +1069,7 @@ class TradeBot:
         self._reconciling = True
         try:
             h = int(hours or getattr(self.cfg, "lookback_hours", 48))
-            h = max(6, min(h, 48))  # gentle bounds
+            h = max(6, min(h, 120))                                     # allows lookback up to 5 days
             self.reconcile_recent_fills(h)
         except Exception as e:
             logging.exception("reconcile_now failed: %s", e)

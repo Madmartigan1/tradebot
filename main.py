@@ -1,4 +1,4 @@
-# main.py (v1.0.5 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C)
+# main.py (v1.0.7 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
@@ -94,11 +94,12 @@ def _elapsed_autotune_once():
             break
         time.sleep(step)
 
-    if _shutdown_once.is_set():
-        return
-
-    api_key, api_secret, portfolio_id = _load_keys_from_envfile()
     try:
+        # --- begin temporary 6h lookback override for elapsed re-tune ---
+        _orig_lb = getattr(CONFIG, "autotune_lookback_hours", 18)
+        _elapsed_lb = getattr(CONFIG, "elapsed_autotune_lookback_hours", _orig_lb)
+        setattr(CONFIG, "autotune_lookback_hours", _elapsed_lb)
+
         summary = _ac(
             CONFIG,
             api_key=api_key,
@@ -106,22 +107,26 @@ def _elapsed_autotune_once():
             portfolio_id=portfolio_id,
             preview_only=getattr(CONFIG, "autotune_preview_only", True),
         )
-        logger.info(
-            "AUTOTUNE(elapsed %dh): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
-            AUTOTUNE_ELAPSED_REFRESH_HOURS,
-            summary.get("mode"),
-            summary.get("portfolio_regime"),
-            summary.get("winner"),
-            float(summary.get("share") or 0.0),
-            float(summary.get("alpha") or 0.0),
-        )
-        logger.info("AUTOTUNE(elapsed) votes: %s", summary.get("portfolio_vote"))
-        logger.info("AUTOTUNE(elapsed) knob changes: %s", summary.get("global_changes"))
-        logger.info("AUTOTUNE(elapsed) offsets (post 3d KPI nudges): %s", summary.get("offsets_changed"))
-        if summary.get("disabled_products"):
-            logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s", summary.get("disabled_products"))
-    except Exception as e:
-        logger.warning("Elapsed autotune failed: %s", e)
+    finally:
+        # always restore the original startup lookback
+        setattr(CONFIG, "autotune_lookback_hours", _orig_lb)
+
+    logger.info(
+        "AUTOTUNE(elapsed %dh using %dh lookback): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
+        AUTOTUNE_ELAPSED_REFRESH_HOURS,
+        _elapsed_lb,
+        summary.get("mode"),
+        summary.get("portfolio_regime"),
+        summary.get("winner"),
+        float(summary.get("share") or 0.0),
+        float(summary.get("alpha") or 0.0),
+    )
+    logger.info("AUTOTUNE(elapsed) votes: %s", summary.get("portfolio_vote"))
+    logger.info("AUTOTUNE(elapsed) knob changes: %s", summary.get("global_changes"))
+    logger.info("AUTOTUNE(elapsed) offsets (post 3d KPI nudges): %s", summary.get("offsets_changed"))
+    if summary.get("disabled_products"):
+        logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s", summary.get("disabled_products"))
+
 
 
 def main():
@@ -143,9 +148,16 @@ def main():
     # Expose the authenticated REST client so autotune.py reuses the same client for the 18h lookback
     setattr(CONFIG, "_rest", getattr(bot, "rest", None))
 
-    # --- v1.0.4 startup order + v1.0.5 tuning/logs ---
-
-    # 1) AutoTune at startup (v1.0.5 hybrid regime)
+    # --- v1.0.7 startup order: Reconcile → AutoTune → Open WS ---
+    # 1) Startup reconcile FIRST so KPI (.state/trades.csv) is available to AutoTune
+    try:
+        lookback = int(getattr(CONFIG, "lookback_hours", 48))
+        log.info("Gathering trade data from past %s hours...", lookback)
+        bot.reconcile_recent_fills(lookback)
+    except Exception as e:
+        log.warning("Startup reconcile failed: %s", e)
+        
+    # 2) Now AutoTune (sees KPI and produces accurate telemetry)
     if getattr(CONFIG, "autotune_enabled", False):
         try:
             summary = autotune_config(
@@ -167,20 +179,16 @@ def main():
             log.info("AUTOTUNE knob changes: %s", summary.get("global_changes"))
             log.info("AUTOTUNE offsets (post 3d KPI nudges): %s", summary.get("offsets_changed"))
             if summary.get("disabled_products"):
-                log.info("AUTOTUNE (advisory only) would disable: %s", summary.get("disabled_products"))
+                cands = summary.get("disabled_products") or []
+                details = summary.get("disabled_details") or {}
+                if cands:
+                    pretty = ", ".join(f"{p}({details.get(p,'')})" if p in details else p for p in cands)
+                    log.info("AUTOTUNE (advisory only) would disable: %s", pretty)
         except Exception as e:
             log.warning("Autotune failed (continuing with current config): %s", e)
 
-    # 2) Open websocket + subscribe (prints “Subscribed … / WS ready”)
+    # 3) Open websocket + subscribe (prints “Subscribed … / WS ready”)
     bot.open()
-
-    # 3) Startup reconcile (same as v1.0.4)
-    try:
-        lookback = int(getattr(CONFIG, "lookback_hours", 48))
-        log.info("Gathering trade data from past %s hours...", lookback)
-        bot.reconcile_recent_fills(lookback)
-    except Exception as e:
-        log.warning("Startup reconcile failed: %s", e)
 
     # --- Mid-session reconcile (restores v1.0.4 behavior) ---
     if getattr(CONFIG, "mid_reconcile_enabled", True):
