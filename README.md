@@ -46,11 +46,11 @@ To make the strategy easier to visualize:
 (*Fun fact:* The term “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.)
 
 Together, they form a chain of command:
-**EMA (Captain)** gives orders,  
+**EMA (Captain)** gives orders.  
 **AutoTune (Navigator)** continuously adjusts the fleet’s heading based on market weather.
-**MACD (Commodore)** ensures strategy aligns with the broader trend,  
-**RSI (Skipper)** vetoes reckless moves,  
-**Quartermaster** secures profits and clears stagnation,  
+**MACD (Commodore)** ensures strategy aligns with the broader trend.  
+**RSI (Skipper)** vetoes reckless moves.  
+**Quartermaster** secures profits and clears stagnation.  
 **Deckhand** keeps the decks clear of idle trades, ensuring the fleet stays agile and battle-ready.
 **Swab** ensures no duplicate fills, stale positions, or misaligned logs remain aboard.
 
@@ -69,19 +69,14 @@ Together, they form a chain of command:
 
 - **Persistent `entry_time` tracking:**  
   Each position’s open timestamp now survives restarts, improving hold-time analytics.
-
 - **Full-exit “shave” logic:**  
   Prevents dust mismatches and `INSUFFICIENT_FUND` preview errors when closing full positions.
-
 - **Live-balance sanity check:**  
   Verifies available base balance before any SELL to stop phantom exits.
-
 - **Processed-fills helper integration:**  
   Automatic pruning and safer persistence to avoid reprocessing past trades.
-
 - **Header consistency check:**  
   A one-time startup audit warns if `trades.csv` ever drifts from the expected schema.
-
 - **Internal cleanup:**  
   Duplicate imports removed, safer exception handling, and improved logging clarity for SELL responses.
 
