@@ -14,7 +14,10 @@ class BotConfig:
     ])
     
     # Dry run used for paper trading. Set to False for live trading
-    dry_run: bool = False         
+    dry_run: bool = True
+    # Max amount per trade and total trade amount per run
+    usd_per_order: float = 20.0
+    daily_spend_cap_usd: float = 200.0  # buys stop after cap; sells continue
 
     # --- v1.0.3: Autotune (startup-only) ---
     autotune_enabled: bool = True
@@ -94,8 +97,6 @@ class BotConfig:
     macd_sell_max: float = -2.0        # SELL only if MACD ≤ −3.0 bps
 
     # Ops / Risk
-    usd_per_order: float = 20.0
-    daily_spend_cap_usd: float = 200.0  # buys stop after cap; sells continue
     per_product_cooldown_s: int = 600   # Wait time in seconds, per coin, before it trades again
     hard_stop_bps: Optional[int] = 100  # emergency stop loss if asset drops below 1.0%
 
