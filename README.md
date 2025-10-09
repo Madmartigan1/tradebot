@@ -46,7 +46,6 @@ To make the strategy easier to visualize:
 (*Fun fact:* The term “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.)
 
 Together they form a chain of command:
-
 **EMA (Captain)** gives orders.  
 **AutoTune (Navigator)** continuously adjusts the fleet’s heading based on market weather.
 **MACD (Commodore)** ensures strategy aligns with the broader trend.  
