@@ -1,10 +1,11 @@
-# main.py (v1.0.7 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
+# main.py (v1.0.8 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
 import threading
 import logging
 import signal
+from typing import Optional
 from dotenv import load_dotenv
 
 from bot.config import CONFIG
@@ -78,19 +79,19 @@ def _load_keys_from_envfile():
     return api_key, api_secret, portfolio_id
 
 
-def _elapsed_autotune_once_with_bot(bot: TradeBot):
+def _elapsed_autotune_once_with_bot(
+    bot: TradeBot,
+    api_key: str,
+    api_secret: str,
+    portfolio_id: Optional[str],
+):
     """
     One-shot AutoTune run after AUTOTUNE_ELAPSED_REFRESH_HOURS, reusing the
     existing authenticated REST client from the running TradeBot instance.
     """
     logger = logging.getLogger("autotune")
 
-    # Respect global enable flag
-    try:
-        from bot.autotune import autotune_config as _ac
-    except Exception:
-        _ac = None
-    if _ac is None or not getattr(CONFIG, "autotune_enabled", False):
+    if not getattr(CONFIG, "autotune_enabled", False):
         return
 
     # Wait until the elapsed window passes (but allow clean shutdown)
@@ -109,11 +110,12 @@ def _elapsed_autotune_once_with_bot(bot: TradeBot):
         setattr(CONFIG, "autotune_lookback_hours", _elapsed_lb)
 
         logger.info("AUTOTUNE (elapsed): starting one-shot update…")
-        summary = _ac(
+        summary = autotune_config(
             CONFIG,
-            # Reuse the live bot’s REST client (no new keys, no extra client)
-            rest=bot.rest,
-            logger=logger,
+            api_key=api_key or "",
+            api_secret=api_secret or "",
+            portfolio_id=portfolio_id,
+            rest=getattr(bot, "rest", None),  # reuse the running bot's client
             preview_only=getattr(CONFIG, "autotune_preview_only", True),
         )
         logger.info(
@@ -166,7 +168,11 @@ def main():
         bot.reconcile_recent_fills(lookback)
     except Exception as e:
         log.warning("Startup reconcile failed: %s", e)
-        
+    try:
+        bot.set_run_baseline()
+    except Exception:
+        pass
+
     # 2) Now AutoTune (sees KPI and produces accurate telemetry)
     if getattr(CONFIG, "autotune_enabled", False):
         try:
@@ -200,11 +206,11 @@ def main():
     # 3) Open websocket + subscribe (prints “Subscribed … / WS ready”)
     bot.open()
 
-    # after you’ve constructed `bot = TradeBot(CONFIG, api_key, api_secret, portfolio_id)`
+    # Optional: one-shot elapsed AutoTune refresh
     if AUTOTUNE_ELAPSED_REFRESH_ENABLED and getattr(CONFIG, "autotune_enabled", False):
         t = threading.Thread(
             target=_elapsed_autotune_once_with_bot,
-            args=(bot,),                      # pass the running bot explicitly
+            args=(bot, api_key, api_secret, portfolio_id),
             name="autotune-elapsed",
             daemon=True,
         )

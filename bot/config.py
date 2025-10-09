@@ -27,7 +27,7 @@ class BotConfig:
     # - Mid-session/on-demand reconcile is clamped to 6–48h for safety:
     #     effective_hours = min(48, max(6, lookback_hours))
     # - Startup reconcile is NOT clamped and will honor the full value.
-    lookback_hours: int = 48
+    lookback_hours: int = 72
     # ======================================================================================
     
     # =====================================================================================
@@ -57,8 +57,8 @@ class BotConfig:
     
     # Quartermaster exits
     enable_quartermaster = True
-    take_profit_bps = 600          # 6%
-    max_hold_hours = 24            # ⟵ was 48; now 24h
+    take_profit_bps = 800          # 8%
+    max_hold_hours = 48            # ⟵ was 24; now 48
     stagnation_close_bps = 200     # 2%
     flat_macd_abs_max = 0.40
     quartermaster_respect_macd = True
@@ -94,8 +94,8 @@ class BotConfig:
     macd_sell_max: float = -2.0        # SELL only if MACD ≤ −3.0 bps
 
     # Ops / Risk
-    usd_per_order: float = 30.0
-    daily_spend_cap_usd: float = 240.0  # buys stop after cap; sells continue
+    usd_per_order: float = 20.0
+    daily_spend_cap_usd: float = 200.0  # buys stop after cap; sells continue
     per_product_cooldown_s: int = 600   # Wait time in seconds, per coin, before it trades again
     hard_stop_bps: Optional[int] = 100  # emergency stop loss if asset drops below 1.0%
 
@@ -143,24 +143,6 @@ class BotConfig:
         #"ALGO-USD":3, "XLM-USD":3, "HBAR-USD":3, "CRO-USD":3, "SUI-USD":3, "IP-USD":3, "WLFI-USD":3,
     #})
     # --------------------------------------------------------------------------------------------------------------------
-
-    # --- Quartermaster exits (take-profit & time-in-trade) ---
-    enable_quartermaster: bool = True
-
-    # Take-profit band: sell if unrealized PnL ≥ this many bps (6% = 600 bps)
-    take_profit_bps: int = 600
-
-    # Time-in-trade “stagnation” exit:
-    # If the position has been open ≥ this many hours AND |PnL| < stagnation_close_bps
-    # AND MACD is ~flat, then close it to free capital.
-    max_hold_hours: int = 24
-    stagnation_close_bps: int = 200            # 2% band
-    flat_macd_abs_max: float = 0.40            # “flat” MACD histogram threshold
-
-    # Veto policy when quartermaster fires:
-    #   - RSI veto is ignored (we’re taking profits or freeing capital, not chasing)
-    #   - Optional MACD veto (keep it True to still avoid selling INTO strong momentum)
-    quartermaster_respect_macd: bool = True
 
     # Disable per-coin EMA overrides for “global” behavior
     ema_params_per_product: Dict[str, Dict[str, int]] = field(default_factory=dict)

@@ -1,8 +1,9 @@
-# bot/tradebot.py — v1.0.7
+# bot/tradebot.py — v1.0.8
 # Adds:
 #  - Quartermaster exits (6% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
 #  - Non-invasive pre-check before EMA captain logic
+#  - Quartermaster looping safeguard
 
 import json
 import logging
@@ -85,8 +86,8 @@ def _quartermaster_exit_ok(cfg, last_price: float, entry_price: float,
 
     pbps = _profit_bps(entry_price, last_price)
 
-    # 1) Take-profit band (default 600 bps = 6%)
-    if pbps >= float(getattr(cfg, "take_profit_bps", 600)):
+    # 1) Take-profit band (default 1200 bps = 12%)
+    if pbps >= float(getattr(cfg, "take_profit_bps", 1200)):
         if getattr(cfg, "quartermaster_respect_macd", True):
             flat_max = float(getattr(cfg, "flat_macd_abs_max", 0.40))
             if macd_hist is not None and macd_hist > flat_max:
@@ -117,14 +118,14 @@ from .utils import (
 )
 from .indicators import EMA, RSI, MACD
 from .orders import compute_maker_limit, decimals_from_inc
-from .strategy import AdvisorSettings, advisor_allows
-
+from .strategy import AdvisorSettings, advisor_allows 
 
 class TradeBot:
     def __init__(self, cfg, api_key: str, api_secret: str, portfolio_id: Optional[str] = None):
         self.cfg = cfg
         self.portfolio_id = portfolio_id if portfolio_id is not None else getattr(cfg, "portfolio_id", None)
-
+        self._balances: Dict[str, float] = {}
+        
         # Core per-product state
         self.ticks: Dict[str, int] = defaultdict(int)  # counts candles in candle mode
         self.min_ticks_per_product: Dict[str, int] = {}
@@ -140,6 +141,25 @@ class TradeBot:
         self.api_key = api_key
         self.api_secret = api_secret
         self.rest = RESTClient(api_key=api_key, api_secret=api_secret, rate_limit_headers=True)
+        
+        # --- sanity: trades.csv header check (runs once per boot) ---
+        try:
+            import os, csv
+            from .constants import TRADES_CSV_FILE
+            if os.path.exists(TRADES_CSV_FILE):
+                with open(TRADES_CSV_FILE, "r", encoding="utf-8", newline="") as f:
+                    first = f.readline()
+                    if first:  # only check non-empty files
+                        hdr = next(csv.reader([first]))
+                        expected = [
+                            "ts","order_id","side","product","size","price","quote_usd","fee","liquidity","pnl",
+                            "position_after","cost_basis_after","intent_price","slippage_abs","slippage_bps",
+                            "hold_time_sec","entry_reason","exit_reason"
+                        ]
+                        if [h.strip() for h in hdr] != expected:
+                            logging.warning("trades.csv header mismatch: found=%s expected=%s", hdr, expected)
+        except Exception as e:
+            logging.debug("trades.csv header check skipped: %s", e)
 
         def on_msg(raw):
             try:
@@ -251,7 +271,8 @@ class TradeBot:
 
         # Load persisted portfolio + processed fills
         self._load_portfolio()
-        self._processed_fills = load_json(PROCESSED_FILLS_FILE, {})
+        from .persistence import ProcessedFills
+        self._processed_fills = ProcessedFills(load_json(PROCESSED_FILLS_FILE, {}))
 
         # Optional: backfill indicators from REST candles to warm up
         if bool(getattr(self.cfg, "use_backfill", True)):
@@ -259,6 +280,38 @@ class TradeBot:
                 self._backfill_seed_indicators()
             except Exception as e:
                 logging.debug("Backfill seeding failed: %s", e)
+                
+    def _get_live_available_base(self, product_id: str) -> float:
+        """
+        Prefer Advanced Trade 'trading-available' over generic funding 'available'.
+        Only fall back to local positions if cfg.allow_position_fallback_for_avail = True.
+        """
+        base = product_id.split("-")[0]
+        try:
+            resp = self.rest.get_accounts()
+            body = getattr(resp, "to_dict", lambda: resp)()
+            for acc in body.get("accounts", []):
+                cur = acc.get("currency") or acc.get("asset")
+                if cur != base:
+                    continue
+                # Prefer trading-available shapes (SDKs vary)
+                trad = acc.get("trading_available_balance") or acc.get("available_for_trading")
+                if isinstance(trad, dict):
+                    val = trad.get("value")
+                else:
+                    val = trad
+                if val is None:
+                    # Fallback to funding 'available' only if trading field missing entirely
+                    avail = acc.get("available_balance")
+                    val = (avail.get("value") if isinstance(avail, dict) else avail) or acc.get("available")
+                return max(0.0, float(val))
+        except Exception as e:
+            logging.debug("get_accounts failed while reading live available for %s: %s", product_id, e)
+
+        # Be conservative: assume 0 unless the user explicitly opts into fallback.
+        if bool(getattr(self.cfg, "allow_position_fallback_for_avail", False)):
+            return max(0.0, float(self.positions.get(product_id, 0.0)))
+        return 0.0
 
     # -------------------- helpers & config --------------------
     def _get_ema_params(self, pid: str) -> Tuple[int, int, int]:
@@ -283,19 +336,37 @@ class TradeBot:
 
     # -------------------- persistence --------------------
     def _load_portfolio(self):
-        data = load_json(PORTFOLIO_FILE, {"positions": {}, "cost_basis": {}, "realized_pnl": 0.0})
+        data = load_json(PORTFOLIO_FILE, {"positions": {}, "cost_basis": {}, "realized_pnl": 0.0, "entry_time": {}})
         for k, v in data.get("positions", {}).items():
             self.positions[k] = float(v)
         for k, v in data.get("cost_basis", {}).items():
             self.cost_basis[k] = float(v)
         self.realized_pnl = float(data.get("realized_pnl", 0.0))
+        try:
+            for pid, iso in (data.get("entry_time") or {}).items():
+                if iso:
+                    ts = datetime.fromisoformat(iso.replace("Z","+00:00")).timestamp()
+                    self._entry_time[pid] = float(ts)
+        except Exception:
+            pass
 
     def _save_portfolio(self):
-        save_json(
-            PORTFOLIO_FILE,
-            {"positions": self.positions, "cost_basis": self.cost_basis, "realized_pnl": float(self.realized_pnl)},
-        )
-
+        et = {}
+        for pid, ts in self._entry_time.items():
+            if ts:
+                try:
+                    et[pid] = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat().replace("+00:00","Z")
+                except Exception:
+                    et[pid] = None
+        save_json(PORTFOLIO_FILE, {
+            "positions": self.positions,
+            "cost_basis": self.cost_basis,
+            "realized_pnl": float(self.realized_pnl),
+            "entry_time": et
+        })
+    def _swab_log(self, detail: str) -> None:
+        logging.info("\n\nYO SWAB!\n\n%s", detail)
+        
     # -------------------- lifecycle --------------------
     def set_run_baseline(self):
         self.run_pnl_baseline = self.realized_pnl
@@ -668,15 +739,67 @@ class TradeBot:
             else:
                 # SELL: use base_size and clamp to held position
                 held = max(0.0, float(self.positions.get(product_id, 0.0)))
-                if held <= 0:
-                    return False, ValueError("No position to sell")
+                live_avail = self._get_live_available_base(product_id)
+                held = min(held, live_avail)
+                # If there's effectively nothing live-available, bail early (avoid INSFUND spam)
+                try:
+                    min_base = float(self.base_inc.get(product_id, 1e-8))
+                except Exception:
+                    min_base = 1e-8
+                if held < (min_base * 0.99):
+                    logging.info(
+                        "Skip SELL %s: no live-available base (held=%.10f, avail=%.10f, inc=%g).",
+                        product_id,
+                        float(self.positions.get(product_id, 0.0)),
+                        float(live_avail),
+                        float(self.base_inc.get(product_id, 1e-8)),
+                    )
+                    return False, ValueError("No live-available base to sell")
                 last = float(self.quotes.get(product_id, {}).get("last") or 0.0)
                 intended_base = quote_usd / last if last > 0 else held
                 base_size = min(held, intended_base)
+                # Shave if this is effectively a full-bag exit
+                try:
+                    base_inc = float(self.base_inc.get(product_id, 1e-8))
+                    shave_steps = int(getattr(self.cfg, "full_exit_shave_increments", 2))
+                    if held > 0 and base_size > 0 and abs(base_size - held) <= (2 * base_inc + 1e-15):
+                        before = base_size
+                        # Swab shout (before cleanup)
+                        self._swab_log(
+                            f"Applying full-exit shave for {product_id}: intended={before:.10f}, "
+                            f"held={held:.10f}, inc={base_inc}, steps={shave_steps}…"
+                        )
+                        # Now do cleanup
+                        base_size = max(0.0, held - shave_steps * base_inc)
+                except Exception:
+                    pass
+                # --- Zero-size guard after shave (avoid pointless MARKET sell) ---
+                try:
+                    inc_for_log = float(self.base_inc.get(product_id, 1e-8))
+                except Exception:
+                    inc_for_log = 1e-8
+                if base_size <= 0:
+                    logging.info(
+                        "Skip SELL %s: base_size=0 after shave (held=%.10f, inc=%g).",
+                        product_id, held, inc_for_log
+                    )
+                    return False, ValueError("No base size to sell")                
                 b_dec = decimals_from_inc(self.base_inc.get(product_id, 1e-8))
                 params["base_size"] = f"{base_size:.{b_dec}f}"
                 resp = self.rest.market_order_sell(**params)
-            return True, resp
+            # Detect previewed insufficient funds and throttle Quartermaster for this product
+            ok = True
+            try:
+                body = getattr(resp, "to_dict", lambda: resp)()
+                if body and (not body.get("success", True)):
+                    err = (body.get("error_response") or {}).get("error") or ""
+                    if str(err).upper().find("INSUFFICIENT_FUND") >= 0:
+                        # avoid hammering same product this candle/session
+                        self._qm_last_ts[product_id] = time.time()
+                        ok = False
+            except Exception:
+                pass
+            return ok, resp
         except Exception as e:
             return False, e
 
@@ -723,9 +846,13 @@ class TradeBot:
                 ask=q.get("ask"),
             )
             if side == "SELL":
-                # clamp maker SELL size to held position
+                # clamp maker SELL size to live available (avoids reserve/lock issues)
                 held = max(0.0, float(self.positions.get(product_id, 0.0)))
-                base_size = min(base_size, held)
+                try:
+                    live_avail = float(self._get_live_available_base(product_id))
+                except Exception:
+                    live_avail = held
+                base_size = min(base_size, held, live_avail)
 
             if base_size <= 0 or limit_price <= 0:
                 logging.error("Invalid maker params for %s %s: price=%.8f size=%.8f", side, product_id, limit_price, base_size)
@@ -745,10 +872,27 @@ class TradeBot:
 
         try:
             body = getattr(resp, "to_dict", lambda: resp)()
-            logging.info("Live %s %s $%.2f placed. Resp: %s (reason=%s)", side, product_id, quote_usd, body, reason)
+            if side == "SELL":
+                # compute a few debug stats for clarity on failures
+                held_dbg = float(self.positions.get(product_id, 0.0))
+                try:
+                    # show live available rather than cached map
+                    avail_dbg = float(self._get_live_available_base(product_id))
+                except Exception:
+                    avail_dbg = -1.0
+                base_inc_dbg = float(self.base_inc.get(product_id, 1e-8))
+                logging.info(
+                    "Live SELL %s $%.2f placed. held=%.10f avail=%.10f base_inc=%g Resp: %s (reason=%s)",
+                    product_id, quote_usd, held_dbg, avail_dbg, base_inc_dbg, body, reason
+                )
+            else:
+                logging.info("Live BUY %s $%.2f placed. Resp: %s (reason=%s)", product_id, quote_usd, body, reason)
         except Exception:
-            logging.info("Live %s %s $%.2f placed. (reason=%s)", side, product_id, quote_usd, reason)
-
+            if side == "SELL":
+                logging.info("Live SELL %s $%.2f placed. (reason=%s)", product_id, quote_usd, reason)
+            else:
+                logging.info("Live BUY %s $%.2f placed. (reason=%s)", product_id, quote_usd, reason)
+        
         # best-effort immediate fills -> update portfolio
         try:
             body = getattr(resp, "to_dict", lambda: resp)()
@@ -782,7 +926,7 @@ class TradeBot:
                 with self._state_lock:
                     for f in fb.get("fills", []):
                         fp = self._fill_fingerprint(f)
-                        if fp in self._processed_fills:
+                        if self._processed_fills.has(fp):
                             continue
                         side_f = (f.get("side") or f.get("order_side") or "").upper()
                         pid_f = f.get("product_id")
@@ -802,7 +946,7 @@ class TradeBot:
                             self.positions[pid_f] = max(0.0, qty_before - sell_qty)
                             if self.positions[pid_f] == 0.0:
                                 self.cost_basis[pid_f] = 0.0
-                        self._processed_fills[fp] = {"t": f.get("trade_time") or f.get("time")}
+                        self._processed_fills.add(fp, {"t": f.get("trade_time") or f.get("time")})
                         any_new = True
                         try:
                             fee_total += fee_f
@@ -850,15 +994,18 @@ class TradeBot:
                             logging.debug("CSV log (immediate) failed: %s", e)
 
                 if any_new:
-                    # prune if large
+                    # prune & save via helper
                     max_keys = int(getattr(self.cfg, "processed_fills_max", 10000))
-                    if len(self._processed_fills) > max_keys:
-                        drop_n = max(1, max_keys // 5)
-                        for k in list(self._processed_fills.keys())[:drop_n]:
-                            self._processed_fills.pop(k, None)
-                    # Guard saves as well
+                    # Swab shout (before cleanup)
+                    try:
+                        pre_entries = len(self._processed_fills.to_dict())
+                    except Exception:
+                        pre_entries = -1
+                    self._swab_log(f"Pruning processed fills (max={max_keys}, current_entries={pre_entries})…")
+                    # Now do cleanup
+                    self._processed_fills.prune(max_keys=max_keys)
                     with self._state_lock:
-                        save_json(PROCESSED_FILLS_FILE, self._processed_fills)
+                        save_json(PROCESSED_FILLS_FILE, self._processed_fills.to_dict())
                         self._save_portfolio()
                     run_delta = self.realized_pnl - self.run_pnl_baseline
                     pnl_str = f"{self.realized_pnl:.{PNL_DECIMALS}f}"
@@ -907,12 +1054,19 @@ class TradeBot:
         params = {
             "start_date": start.isoformat().replace("+00:00", "Z"),
             "end_date": end.isoformat().replace("+00:00", "Z"),
-            "limit": 200,
+            "limit": 1000,
         }
+        fills = []
         try:
-            resp = self.rest.get("/api/v3/brokerage/orders/historical/fills", params=params)
-            fb = getattr(resp, "to_dict", lambda: resp)()
-            fills = fb.get("fills", [])
+            while True:
+                resp = self.rest.get("/api/v3/brokerage/orders/historical/fills", params=params)
+                fb = getattr(resp, "to_dict", lambda: resp)()
+                page = fb.get("fills", []) or []
+                fills.extend(page)
+                cursor = fb.get("cursor") or fb.get("next_cursor") or fb.get("pagination", {}).get("cursor")
+                if not cursor or not page:
+                    break
+                params["cursor"] = cursor
         except Exception as e:
             logging.debug("Could not fetch recent fills: %s", e)
             return
@@ -920,13 +1074,13 @@ class TradeBot:
         changed = False
         for f in fills:
             fp = self._fill_fingerprint(f)
-            if fp in self._processed_fills:
+            if self._processed_fills.has(fp):
                 continue
 
             side = (f.get("side") or f.get("order_side") or "").upper()
             pid = f.get("product_id")
             if not pid or side not in {"BUY", "SELL"}:
-                self._processed_fills[fp] = {"skip": True}
+                self._processed_fills.add(fp, {"skip": True})
                 changed = True
                 continue
 
@@ -935,7 +1089,7 @@ class TradeBot:
                 price = float(f.get("price") or 0.0)
                 fee = float(f.get("fee") or 0.0)
             except Exception:
-                self._processed_fills[fp] = {"bad_num": True}
+                self._processed_fills.add(fp, {"bad_num": True})
                 changed = True
                 continue
 
@@ -956,7 +1110,7 @@ class TradeBot:
                     if self.positions[pid] == 0.0:
                         self.cost_basis[pid] = 0.0
 
-                self._processed_fills[fp] = {"t": f.get("trade_time") or f.get("time")}
+                self._processed_fills.add(fp, {"t": f.get("trade_time") or f.get("time")})
 
                 # KPI CSV logging (reconcile)
                 try:
@@ -998,15 +1152,18 @@ class TradeBot:
             changed = True
 
         if changed:
-            # prune if large
+            # prune & save via helper
+            # Swab shout (before cleanup)
             max_keys = int(getattr(self.cfg, "processed_fills_max", 10000))
-            if len(self._processed_fills) > max_keys:
-                drop_n = max(1, max_keys // 5)
-                for k in list(self._processed_fills.keys())[:drop_n]:
-                    self._processed_fills.pop(k, None)
-            # Guard final saves
+            try:
+                pre_entries = len(self._processed_fills.to_dict())
+            except Exception:
+                pre_entries = -1
+            self._swab_log(f"Pruning processed fills (max={max_keys}, current_entries={pre_entries})…")
+            # prune & save via helper
+            self._processed_fills.prune(max_keys=max_keys)
             with self._state_lock:
-                save_json(PROCESSED_FILLS_FILE, self._processed_fills)
+                save_json(PROCESSED_FILLS_FILE, self._processed_fills.to_dict())
                 self._save_portfolio()
             run_delta = self.realized_pnl - (getattr(self, "run_pnl_baseline", self.realized_pnl))
             pnl_str = f"{self.realized_pnl:.{PNL_DECIMALS}f}"
@@ -1069,9 +1226,11 @@ class TradeBot:
         self._reconciling = True
         try:
             h = int(hours or getattr(self.cfg, "lookback_hours", 48))
-            h = max(6, min(h, 120))                                     # allows lookback up to 5 days
+            # Allow fills lookback up to 7 days. Increase for wider range.
+            h = max(6, min(h, 168))
             self.reconcile_recent_fills(h)
         except Exception as e:
             logging.exception("reconcile_now failed: %s", e)
         finally:
             self._reconciling = False
+

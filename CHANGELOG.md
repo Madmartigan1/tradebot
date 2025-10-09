@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
+## [1.0.8] - 2025-10-09
+### Added
+- **Persistent `entry_time` tracking** across runs for accurate hold-time analytics.
+- **Full-exit “shave” logic** to prevent dust mismatches and `INSUFFICIENT_FUND` preview errors.
+- **Live-balance sanity check** before any SELL to eliminate phantom exit attempts.
+- **Processed-fills helper integration** for automatic pruning and safer persistence.
+- **Header consistency audit** that validates `trades.csv` headers at startup.
+- **New crewmember — 🧹 The Swab:**  
+  Keeps the decks spotless and the logs consistent. The Swab ensures no duplicate fills, stale positions, or misaligned records remain aboard.  
+  *Fun fact:* the name “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.
+  - Adaptive alpha curve for smoother yet more decisive BLEND transitions.
+- Introduced per-knob learning rates, quantized steps (0.5 bps), and min visible delta (0.25 bps).
+- Implemented per-vote safety cap (2 bps) to prevent over-correction.
+- BLEND now moves current knobs toward the winning regime preset instead of averaging two presets.
+- Ensures clear uptrend/downtrend/choppy “SNAP” modes still use their exact golden presets.
+- Added optional [AUTOTUNE DRIFT] telemetry line showing deviation from choppy baseline.
+
+### Changed
+- Improved SELL logging with detailed `held`, `avail`, and `base_inc` diagnostics.
+- Cleaned duplicate imports, clarified exception handling, and tightened synchronization around state writes.
+- Refined reconcile and immediate-fill paths to prevent reprocessing old trades.
+
+### Fixed
+- Quartermaster loop prevention on previously sold assets.
+- Occasional preview errors when exiting full positions.
+- Minor indentation and persistence alignment issues in `tradebot.py`.
+- Minor bug fix: In autotune.py accept optional rest= client in autotune_config to fix mid-session retune crash (unexpected keyword argument 'rest') and reuse the bot’s authenticated REST client.
+
+### Notes
+- Fully **state-compatible** with v1.0.7 (no schema or header changes).
+- `.state/portfolio.json` and `.state/trades.csv` can be preserved seamlessly.
+- Fees remain logged as `0.0` when Coinbase fee-free campaigns are active.
+
+
+
 ## [1.0.7] - 2025-10-07
 ### Added
 - **Regime voting decoupled from trading candles:**
