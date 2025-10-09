@@ -45,7 +45,8 @@ To make the strategy easier to visualize:
 - **Swab → Deck Maintenance & Logkeeper** The newest crew member in v1.0.8 — responsible for keeping the decks spotless and records consistent.
 (*Fun fact:* The term “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.)
 
-Together, they form a chain of command:
+Together they form a chain of command:
+
 **EMA (Captain)** gives orders.  
 **AutoTune (Navigator)** continuously adjusts the fleet’s heading based on market weather.
 **MACD (Commodore)** ensures strategy aligns with the broader trend.  
