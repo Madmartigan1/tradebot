@@ -14,7 +14,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - **New crewmember — 🧹 The Swab:**  
   Keeps the decks spotless and the logs consistent. The Swab ensures no duplicate fills, stale positions, or misaligned records remain aboard.  
   *Fun fact:* the name “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.
-  - Adaptive alpha curve for smoother yet more decisive BLEND transitions.
+- Adaptive alpha curve for smoother yet more decisive BLEND transitions.
 - Introduced per-knob learning rates, quantized steps (0.5 bps), and min visible delta (0.25 bps).
 - Implemented per-vote safety cap (2 bps) to prevent over-correction.
 - BLEND now moves current knobs toward the winning regime preset instead of averaging two presets.
