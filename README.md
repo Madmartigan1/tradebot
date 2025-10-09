@@ -1,4 +1,4 @@
-# Tradebot v1.0.7
+# Tradebot v1.0.8
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -9,11 +9,12 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-⚖️ **Sharper thresholds and Quartermaster logic — an adaptive fleet navigating both storms and still waters**
+⚙️ **Maintenance and resilience upgrades — a cleaner deck, steadier sails, and sharper command discipline**
 
-Tradebot is an automated crypto trading bot for **Coinbase Advanced**.  
-It uses an **EMA crossover** strategy with **RSI/MACD advisors**, plus risk controls like daily caps, cooldowns, and optional stop-loss tolerance.  
-By default, it runs on **5-minute candles** with `confirm_candles=3`.
+Tradebot v1.0.8 focuses on **robustness, data consistency, and operational hygiene**.  
+It tightens internal bookkeeping, prevents duplicate reconciliations, and adds self-checks to ensure the fleet remains seaworthy through long voyages.
+Also introducing a smarter BLEND mechanism.
+Instead of small, barely visible float adjustments, the tuner now applies quantized, weighted, and bounded moves toward the prevailing market regime.
 
 ---
 
@@ -41,6 +42,9 @@ To make the strategy easier to visualize:
 - **Deckhand (24 h, ±2%)**: The “broom” that sweeps idle trades off the deck when they drift aimlessly without momentum, keeping the decks lean and ready for action.
   This ensures capital is recycled efficiently while the Captain (EMA) and Advisors (RSI/MACD) focus on live opportunities.
 
+- **Swab → Deck Maintenance & Logkeeper** The newest crew member in v1.0.8 — responsible for keeping the decks spotless and records consistent.
+(*Fun fact:* The term “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.)
+
 Together, they form a chain of command:
 **EMA (Captain)** gives orders,  
 **AutoTune (Navigator)** continuously adjusts the fleet’s heading based on market weather.
@@ -48,11 +52,12 @@ Together, they form a chain of command:
 **RSI (Skipper)** vetoes reckless moves,  
 **Quartermaster** secures profits and clears stagnation,  
 **Deckhand** keeps the decks clear of idle trades, ensuring the fleet stays agile and battle-ready.
+**Swab** ensures no duplicate fills, stale positions, or misaligned logs remain aboard.
 
 ---
 
 ## 📖 Documentation
-- **Full User Guide (PDF):** [docs/README.pdf](docs/README.pdf)
+- **Full User Guide (PDF):** [docs/OpsManual.pdf](docs/OpsManual.pdf)
 - More docs:
   - [USAGE.md](USAGE.md)
   - [CONTRIBUTING.md](CONTRIBUTING.md)
@@ -60,31 +65,37 @@ Together, they form a chain of command:
 
 ---
 
-## ✨ v1.0.7 Highlights
-- **Regime voting decoupled from trading timeframe:**
-  - New `autotune_vote_interval` lets AutoTune analyze trends on 15-minute candles while trading continues on 5-minute candles.
-  - Guarantees more stable regime detection over 18-hour windows.
-- **Telemetry upgrade:**
-  - AutoTune now runs *after* portfolio reconciliation so it sees real trade KPI data.
-  - Advisory “would disable” list now includes reasons like `inactive_3d` or `neg_pnl_3d_bps=-10.0,trades=4`.
-- **Candle ordering fix:**  
-  All fetched candles are now sorted by timestamp (oldest → newest) to avoid reversed price sequences from Coinbase responses.
-- **Cleaner startup sequence:**  
-  Reconcile → AutoTune → WebSocket subscription ensures telemetry accuracy before live trading begins.
-- **Dry-run hygiene:**  
-  Empty KPI telemetry is suppressed automatically in dry-run mode (avoids `no_kpi` spam).
-- **Quartermaster module:**  
-  Introduces automated take-profit (≥ 6 %) and stagnation (≥ 24 h & ± 2 %) exits, acting before EMA logic to secure gains, clear idle capital, and maintain fleet efficiency.
+## ✨ v1.0.8 Highlights
+
+- **Persistent `entry_time` tracking:**  
+  Each position’s open timestamp now survives restarts, improving hold-time analytics.
+
+- **Full-exit “shave” logic:**  
+  Prevents dust mismatches and `INSUFFICIENT_FUND` preview errors when closing full positions.
+
+- **Live-balance sanity check:**  
+  Verifies available base balance before any SELL to stop phantom exits.
+
+- **Processed-fills helper integration:**  
+  Automatic pruning and safer persistence to avoid reprocessing past trades.
+
+- **Header consistency check:**  
+  A one-time startup audit warns if `trades.csv` ever drifts from the expected schema.
+
+- **Internal cleanup:**  
+  Duplicate imports removed, safer exception handling, and improved logging clarity for SELL responses.
 
 ---
 
 ### Upgrade notes
-- Ensure `.state/portfolio.json` and `.state/trades.csv` are preserved between versions for accurate P&L and KPI history.
-- If you skip multiple days between runs, consider raising:
-  - `autotune_lookback_hours` → 48–72  
-  - leave `autotune_vote_min_candles=72`
-- The EMA/RSI/MACD structures remain unchanged; only AutoTune logic and candle ordering improved.
-  
+
+- This version is **state-compatible** with v1.0.7.  
+  You can keep your `.state/portfolio.json` and `.state/trades.csv` files intact.
+- Old phantom positions are automatically reconciled and cleaned.
+- No CSV header or format changes — historical logs remain valid.
+- Adjusted autotune function. Each vote adjusts knobs by up to 2 bps, rounded to 0.5 bps, with per-knob learning rates for smooth adaptation.
+- The golden choppy preset remains the bot’s stable baseline.
+
 ---
 
 ## 🔐 Secrets
