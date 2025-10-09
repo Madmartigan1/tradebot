@@ -1,4 +1,4 @@
-# bot/autotune.py (v1.0.7) — telemetry + hybrid tuning + caller-controlled lookback
+# bot/autotune.py (v1.0.8) — telemetry + stronger BLEND tuning + caller-controlled lookback
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -117,29 +117,55 @@ def _read_csv_3d_stats(csv_path: str) -> Dict[str, ProductStats]:
     out: Dict[str, ProductStats] = {}
     if not os.path.exists(csv_path):
         return out
+
+    # only last 3 days
     cutoff = datetime.now(timezone.utc) - timedelta(days=3)
+
+    def _to_dt(ts: str) -> Optional[datetime]:
+        if not ts:
+            return None
+        try:
+            # support "YYYY-mm-ddTHH:MM:SSZ" and ISO with tz
+            ts2 = str(ts).strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts2)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except Exception:
+            return None
+
     try:
-        with open(csv_path, newline="") as f:
+        with open(csv_path, "r", newline="", encoding="utf-8") as f:
             r = csv.DictReader(f)
             for row in r:
-                try:
-                    pid = row.get("product_id") or row.get("product") or ""
-                    ts = row.get("closed_at") or row.get("timestamp") or ""
-                    if not pid or not ts:
-                        continue
-                    dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-                    if dt.tzinfo is None:
-                        dt = dt.replace(tzinfo=timezone.utc)
-                    if dt < cutoff:
-                        continue
-                    pnl_bps = float(row.get("pnl_bps", "0") or 0.0)
-                    hit = out.setdefault(pid, ProductStats())
-                    hit.pnl_proxy_3d += pnl_bps
-                    hit.trades_3d += 1
-                except Exception:
+                # Headers you keep:
+                # ts, order_id, side, product, size, price, quote_usd, fee, liquidity, pnl,
+                # position_after, cost_basis_after, intent_price, slippage_abs, slippage_bps,
+                # hold_time_sec, entry_reason, exit_reason
+                pid = (row.get("product") or "").strip()
+                ts = (row.get("ts") or "").strip()
+                if not pid or not ts:
                     continue
+
+                dt = _to_dt(ts)
+                if not dt or dt < cutoff:
+                    continue
+
+                try:
+                    pnl_abs = float(row.get("pnl") or 0.0)
+                    quote_usd = float(row.get("quote_usd") or 0.0)
+                except ValueError:
+                    pnl_abs, quote_usd = 0.0, 0.0
+
+                pnl_bps = (pnl_abs / quote_usd) * 10_000.0 if quote_usd > 0 else 0.0
+
+                hit = out.setdefault(pid, ProductStats())
+                hit.pnl_proxy_3d += pnl_bps
+                hit.trades_3d += 1
     except Exception:
+        # keep autotune resilient even if CSV is in flux
         pass
+
     return out
 
 
@@ -248,6 +274,57 @@ OFFSET_FLOOR_OTHER = 16.0
 OFFSET_CEIL = 40.0
 OFFSET_FLOOR_GLOBAL = 6.0
 
+# ---------------------------
+# Stronger BLEND helpers
+# ---------------------------
+# Visible step size (bps) to make changes meaningful in logs/behavior
+_QUANTUM_BPS = 0.5
+# Ignore tiny moves below this (bps)
+_MIN_VISIBLE_BPS = 0.25
+# Per-vote safety cap (bps)
+_MAX_DELTA_PER_VOTE_BPS = 2.0
+# Per-knob weights: faster/slower “learning rates”
+_KNOB_WEIGHT = {
+    "ema_deadband_bps": 1.0,   # most responsive
+    "macd_buy_min":     0.6,
+    "macd_sell_max":    0.6,
+    "rsi_buy_max":      0.5,
+    "rsi_sell_min":     0.5,
+    "confirm_candles":  0.3,   # slowest
+    "per_product_cooldown_s": 0.4,
+}
+
+def _alpha_from_share(winner_share: float) -> float:
+    """
+    Map winner share in [0,1] to a blending factor alpha in [0,1].
+    More decisive once share > 0.55; zero when share <= 0.5.
+    """
+    if winner_share <= 0.50:
+        return 0.0
+    if winner_share < 0.55:
+        return 0.15
+    # ramp up quicker after 0.55; clamp at 1.0
+    return min(1.0, 0.15 + (winner_share - 0.55) * 1.7)
+
+def _quantize_bps(x: float) -> float:
+    return round(x / _QUANTUM_BPS) * _QUANTUM_BPS
+
+def _apply_knob_blend(cur: float, target: float, alpha: float, knob_name: str) -> float:
+    """
+    Blend toward target, apply knob weight, cap per-vote delta, and quantize.
+    Units are 'bps' for bps-style knobs; integer knobs will be rounded later.
+    """
+    w = _KNOB_WEIGHT.get(knob_name, 1.0)
+    blended = cur + (target - cur) * alpha * w
+    # cap per-vote change to avoid big jumps
+    delta = max(-_MAX_DELTA_PER_VOTE_BPS, min(_MAX_DELTA_PER_VOTE_BPS, blended - cur))
+    proposed = cur + delta
+    q = _quantize_bps(proposed)
+    # ignore float dust
+    if abs(q - cur) < _MIN_VISIBLE_BPS:
+        return cur
+    return q
+
 
 # =========================
 # Portfolio vote (v1.0.4) — REUSE existing authenticated client; do NOT construct a new one
@@ -300,7 +377,7 @@ def _compute_portfolio_vote(
 
 
 # ===================================================
-# v1.0.8: Hybrid mixer + detailed summary + Telemetry + lookback override
+# v1.0.9: Hybrid mixer + detailed summary + Telemetry + lookback override
 # ===================================================
 def autotune_config(
     cfg,
@@ -309,7 +386,15 @@ def autotune_config(
     portfolio_id: Optional[str] = None,
     preview_only: bool = False,
     lookback_hours_override: Optional[int] = None,
+    rest: Optional["RESTClient"] = None,  # accept injected REST client
 ):
+    # If a REST client is provided (older callers may pass rest=bot.rest),
+    # expose it to the existing vote path which expects cfg._rest.
+    if rest is not None:
+        try:
+            setattr(cfg, "_rest", rest)
+        except Exception:
+            pass
     portfolio_vote, meta = _compute_portfolio_vote(
         cfg, api_key=api_key, api_secret=api_secret, lookback_hours_override=lookback_hours_override
     )
@@ -317,49 +402,57 @@ def autotune_config(
     winner, votes = max(portfolio_vote.items(), key=lambda kv: kv[1])
     share = votes / total
 
+    # Decide mode and blending strength
     if share >= 0.70:
         mode = "SNAP"; portfolio_regime = winner; alpha = 1.0
     elif 0.55 <= share <= 0.69:
         mode = "BLEND"; portfolio_regime = winner
-        alpha = max(0.0, min(1.0, (share - 0.55) / (0.69 - 0.55)))
+        # old linear map replaced by a more decisive curve
+        alpha = _alpha_from_share(share)
     else:
         mode = "CHOPPY"; portfolio_regime = "choppy"; alpha = 0.0
 
-    if mode == "SNAP":
-        targets = REGIME_TARGETS.get(portfolio_regime, REGIME_TARGETS["choppy"])
-    elif mode == "CHOPPY":
-        targets = REGIME_TARGETS["choppy"]
-    else:
-        win_t = REGIME_TARGETS.get(winner, REGIME_TARGETS["choppy"])
-        cho_t = REGIME_TARGETS["choppy"]
-        targets = {}
-        for k in set(win_t.keys()) | set(cho_t.keys()):
-            v_win = win_t.get(k, cho_t.get(k))
-            v_cho = cho_t.get(k, win_t.get(k, v_win))
-            if k in BLEND_KNOBS and isinstance(v_win, (int, float)) and isinstance(v_cho, (int, float)):
-                v = (alpha * v_win) + ((1.0 - alpha) * v_cho)
-                lo, hi = _blend_clamp(k, winner, "choppy")
-                if lo is not None:
-                    v = max(lo, min(hi, v))
-                if isinstance(v_win, int) or isinstance(v_cho, int) or k in {"confirm_candles", "per_product_cooldown_s"}:
-                    v = int(round(v))
-                targets[k] = v
-            else:
-                targets[k] = v_win
-
+    # Build target knob values
     changes: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
 
-    def set_if(name: str, wanted):
+    def _apply_and_record(name: str, wanted):
+        # For non-BLEND, clamp by the portfolio_regime band.
         new_val = wanted if (mode == "BLEND" and name in BLEND_KNOBS) else _clamp_for(portfolio_regime, name, wanted)
         old = getattr(cfg, name, None)
         if not preview_only:
             setattr(cfg, name, new_val)
         return old, new_val
 
-    for k, v in targets.items():
-        changes[k] = set_if(k, v)
+    if mode in ("SNAP", "CHOPPY"):
+        targets = REGIME_TARGETS.get(portfolio_regime, REGIME_TARGETS["choppy"])
+        for k, v in targets.items():
+            changes[k] = _apply_and_record(k, v)
 
-    # Only matters if you ever flip preview_only=False
+    else:
+        # BLEND: move current cfg toward the WINNER preset (quantized, capped), then clamp to the
+        # overlap band between winner & choppy so we never exceed either regime’s safe envelope.
+        win_t = REGIME_TARGETS.get(winner, REGIME_TARGETS["choppy"])
+        cho_t = REGIME_TARGETS["choppy"]
+
+        for name in (set(win_t.keys()) | set(cho_t.keys())):
+            tgt = win_t.get(name, cho_t.get(name))
+            cur = getattr(cfg, name, tgt)
+
+            if name in BLEND_KNOBS and isinstance(tgt, (int, float)) and isinstance(cur, (int, float)):
+                proposed = _apply_knob_blend(float(cur), float(tgt), alpha, name)
+                lo, hi = _blend_clamp(name, winner, "choppy")
+                if lo is not None:
+                    proposed = max(lo, min(hi, proposed))
+
+                # integers: confirm_candles and (for stability) per_product_cooldown_s
+                if name in {"confirm_candles", "per_product_cooldown_s"}:
+                    proposed = int(round(proposed))
+                changes[name] = _apply_and_record(name, proposed)
+            else:
+                # Non-blend knobs follow the winner preset directly
+                changes[name] = _apply_and_record(name, tgt)
+
+    # ---- Offsets & telemetry (unchanged) ----
     allow_disabling = (mode == "SNAP" and portfolio_regime != "choppy")
 
     disabled: List[str] = []
@@ -410,9 +503,9 @@ def autotune_config(
         "winner": winner,
         "share": round(share, 4),
         "alpha": round(alpha, 4),
-        "portfolio_vote": {k: int(v) for k, v in (portfolio_vote or {}).items()},
+        "portfolio_vote": {k: int(v) for k, v in (portfolio_vote or {}).items() },
         "portfolio_regime": portfolio_regime,
-        "vote_meta": meta,  # <-- exposes hours/granularity/min_candles used
+        "vote_meta": meta,  # exposes hours/granularity/min_candles used
         "knob_changes": knob_changes,
         "global_changes": {k: f"{ov[0]}→{ov[1]}" for k, ov in changes.items()},
         "disabled_products": sorted(disabled),            # telemetry, shown by main if non-empty

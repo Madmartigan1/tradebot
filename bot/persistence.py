@@ -2,8 +2,9 @@
 import json, os, io, time
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Dict, Any, Iterable, Tuple
 from pathlib import Path
+from collections import OrderedDict
 
 from .constants import (
     DAILY_FILE, LASTTRADE_FILE, TRADE_LOG_FILE, PORTFOLIO_FILE, PROCESSED_FILLS_FILE, PNL_DECIMALS
@@ -129,22 +130,73 @@ class PortfolioStore:
             "realized_pnl": float(self.realized_pnl),
         })
 
-class ProcessedFills:
-    def __init__(self):
-        self.idx = load_json(PROCESSED_FILLS_FILE, {})
 
-    def has(self, fp: str) -> bool:
-        return fp in self.idx
+class ProcessedFills:    
+    """
+    Lightweight index of processed fill fingerprints -> metadata.
+    Designed for append-heavy writes with occasional pruning of oldest items.
+    """
+    def __init__(self, initial: Dict[str, Dict[str, Any]] | None = None):
+        # Keep oldest->newest order so prune() removes the oldest first
+        self.idx: OrderedDict[str, Dict[str, Any]] = OrderedDict()
+        if isinstance(initial, dict):
+            def _epoch(meta: Dict[str, Any]) -> float:
+                t = meta.get("t")
+                try:
+                    if isinstance(t, (int, float)):
+                        return float(t)
+                    if isinstance(t, str):
+                        dt = datetime.fromisoformat(t)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return dt.timestamp()
+                except Exception:
+                    pass
+                return 0.0
+            # Load oldest-first for deterministic pruning
+            for k, v in sorted(initial.items(), key=lambda kv: _epoch(kv[1])):
+                self.idx[k] = v
 
-    def add(self, fp: str, meta: Dict):
-        self.idx[fp] = meta
-        save_json(PROCESSED_FILLS_FILE, self.idx)
+    # --- core API expected by tradebot.py ---
+    def has(self, key: str) -> bool:
+        """Return True if key already recorded."""
+        return key in self.idx
 
-    def prune(self, max_keys: int = 10_000, drop_pct: float = 0.2):
-        if len(self.idx) <= max_keys:
+    def add(self, key: str, meta: Dict[str, Any]) -> None:
+        """
+        Record a processed fill fingerprint with metadata.
+        If key exists, update metadata and move to the end (newest).
+        """
+        if key in self.idx:
+            # update in place, then move to end to reflect "latest seen"
+            self.idx[key].update(meta or {})
+            self.idx.move_to_end(key, last=True)
+        else:
+            self.idx[key] = dict(meta or {})
+
+    def prune(self, max_keys: int = 10_000) -> None:
+        """Drop oldest entries until size <= max_keys."""
+        n = len(self.idx)
+        if n <= max_keys:
             return
-        drop_n = max(1, int(max_keys * drop_pct))
-        keys = list(self.idx.keys())
-        for k in keys[:drop_n]:
-            self.idx.pop(k, None)
-        save_json(PROCESSED_FILLS_FILE, self.idx)
+        drop = n - max_keys
+        for _ in range(drop):
+            # pop oldest (leftmost)
+            self.idx.popitem(last=False)
+
+    def to_dict(self) -> Dict[str, Dict[str, Any]]:
+        """Return a plain dict for JSON persistence."""
+        return dict(self.idx)
+
+    # --- convenience methods (optional but handy) ---
+    def __len__(self) -> int:
+        return len(self.idx)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.idx
+
+    def items(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        return self.idx.items()
+        
+
+
