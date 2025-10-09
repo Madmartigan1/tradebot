@@ -46,13 +46,7 @@ To make the strategy easier to visualize:
 (*Fun fact:* The term “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.)
 
 Together they form a chain of command:
-**EMA (Captain)** gives orders.  
-**AutoTune (Navigator)** continuously adjusts the fleet’s heading based on market weather.
-**MACD (Commodore)** ensures strategy aligns with the broader trend.  
-**RSI (Skipper)** vetoes reckless moves.  
-**Quartermaster** secures profits and clears stagnation.  
-**Deckhand** keeps the decks clear of idle trades, ensuring the fleet stays agile and battle-ready.
-**Swab** ensures no duplicate fills, stale positions, or misaligned logs remain aboard.
+**EMA (Captain)** gives orders -> **AutoTune (Navigator)** continuously adjusts the fleet’s heading based on market weather -> **MACD (Commodore)** ensures strategy aligns with the broader trend -> **RSI (Skipper)** vetoes reckless moves -> **Quartermaster** secures profits and clears stagnation -> **Deckhand** keeps the decks clear of idle trades, ensuring the fleet stays agile and battle-ready -> **Swab** ensures no duplicate fills, stale positions, or misaligned logs remain aboard.
 
 ---
 
