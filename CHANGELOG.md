@@ -3,6 +3,32 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+## [1.0.9] - 2025-10-14
+### Added
+- **Graceful shutdown on all platforms** with unified `_request_shutdown()` for `Ctrl+C`/`SIGTERM` and thread exceptions; optional `SIGBREAK` on Windows.
+- **Uncaught-exception hooks** (`sys.excepthook`, `threading.excepthook`) that log, request shutdown, and exit cleanly.
+- **Elapsed-time AutoTune refresh** (one-shot after N hours) that reuses the live REST client for consistent previews and lighter rate limits.
+- **Boot sequence hardening** to **Reconcile → AutoTune → Websocket** so tuning sees KPI/telemetry at startup.
+- **Richer telemetry** including regime votes, per-product offsets, and an advisory “would disable” list.
+
+### Changed
+- **Centralized shutdown behavior** so signals, exceptions, and loop exits follow the same cleanup path (close WS, flush, exit).
+- **Windows-friendly control flow** relying on `KeyboardInterrupt` with optional `SIGBREAK` for `Ctrl+Break`.
+- **AutoTune client reuse** via `CONFIG._rest` to match session auth and rate limits.
+- **Mid-session reconcile cadence** uses short sleep steps to keep `Ctrl+C` responsive.
+- Expanded trades.csv schema to include per-trade fees, realized P&L, quote spend/proceeds, order reason, and sizing metadata (base_increment/min_market_base_size/shave), enabling accurate cash-flow and P&L reconciliation.
+- Legacy CSVs are not backward-compatible; sorting is now standardized by execution time (newest first).
+
+### Fixed
+- **Safer bot construction / open** with explicit logging and clean exit if `TradeBot` init or `bot.open()` fails.
+- **Clearer order diagnostics** for post-only maker rejections (`INVALID_LIMIT_PRICE_POST_ONLY`) and preview outcomes.
+
+### Notes
+- **State-compatible** with v1.0.8 (no schema/header changes).
+- If `.state/portfolio.json` was deleted, positions/cost basis will rebuild from fills and future trades.
+- Elapsed AutoTune refresh defaults to **enabled (4h)**; adjust or disable in config.
+
+
 
 ## [1.0.8] - 2025-10-09
 ### Added
