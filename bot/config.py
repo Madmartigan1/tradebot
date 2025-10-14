@@ -1,4 +1,4 @@
-# ----v1.0.7----
+# ----v1.0.9----
 # bot/config.py
 import logging
 from dataclasses import dataclass, field
@@ -8,16 +8,17 @@ from typing import Dict, List, Optional
 class BotConfig:
     # Products (global settings apply to all)
     product_ids: List[str] = field(default_factory=lambda: [
-        "ETH-USD","XRP-USD","ADA-USD","ATOM-USD","ALGO-USD","XLM-USD","HBAR-USD", "FIL-USD",
+        "ETH-USD","XRP-USD","ADA-USD","TRAC-USD","ALGO-USD","XLM-USD","HBAR-USD", "FIL-USD",
         "NEAR-USD","SOL-USD","DOGE-USD","AVAX-USD","LINK-USD","SUI-USD","LTC-USD","CRO-USD",
-        "DOT-USD","ARB-USD", "IP-USD", "WLFI-USD", "FLOKI-USD", "PEPE-USD",
+        "DOT-USD","ARB-USD", "IP-USD", "WLFI-USD", "FLOKI-USD", "PEPE-USD", "BONK-USD", 
+        "SEI-USD", "SHIB-USD", "TAO-USD",
     ])
     
     # Dry run used for paper trading. Set to False for live trading
-    dry_run: bool = True
+    dry_run: bool = False
     # Max amount per trade and total trade amount per run
-    usd_per_order: float = 20.0
-    daily_spend_cap_usd: float = 200.0  # buys stop after cap; sells continue
+    usd_per_order: float = 30
+    daily_spend_cap_usd: float = 180.0  # buys stop after cap; sells continue
 
     # --- v1.0.3: Autotune (startup-only) ---
     autotune_enabled: bool = True
@@ -55,13 +56,13 @@ class BotConfig:
     autotune_vote_min_candles: int = 144
     # ------------------------------------------------------
     
-    # Elapsed re-tune lookback (fires hours after bot start; see main.py)
-    elapsed_autotune_lookback_hours: int = 6
+    # Currenly a NO-OP as it was planned but eliminated due to flapping risks.
+    #elapsed_autotune_lookback_hours: int = 6
     
     # Quartermaster exits
     enable_quartermaster = True
     take_profit_bps = 800          # 8%
-    max_hold_hours = 48            # ⟵ was 24; now 48
+    max_hold_hours = 36            # ⟵ was 24; now 36
     stagnation_close_bps = 200     # 2%
     flat_macd_abs_max = 0.40
     quartermaster_respect_macd = True
@@ -73,7 +74,7 @@ class BotConfig:
 
 
     # -------- Candles v1.0.2 --------
-    mode: str = "ws"                   # or "local" if you want local aggregation, ws is fine by default.
+    mode: str = "local"                # "ws" server side candle builds or "local" if you want local aggregation, ws is fine by default.
     candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
     min_candles: int = 120             # wait for indicator warm-up
     confirm_candles: int = 3           # consecutive cross confirms
@@ -98,7 +99,7 @@ class BotConfig:
 
     # Ops / Risk
     per_product_cooldown_s: int = 600   # Wait time in seconds, per coin, before it trades again
-    hard_stop_bps: Optional[int] = 100  # emergency stop loss if asset drops below 1.0%
+    hard_stop_bps: Optional[int] = 300  # emergency stop loss if asset drops below 3.0%
 
     # Maker/post-only
     prefer_maker: bool = True
@@ -107,16 +108,17 @@ class BotConfig:
 
     maker_offset_bps_per_product: Dict[str, float] = field(default_factory=lambda: {
         # Tier A / very active — trimmed 2 bps
-        "ETH-USD":16.0, "SOL-USD":18.0, "LINK-USD":18.0, "XRP-USD":20.0, "DOGE-USD":20.0, "LTC-USD":20.0,
+        "ETH-USD":16.0, "SOL-USD":18.0, "LINK-USD":18.0, "XRP-USD":20.0, "DOGE-USD":20.0, "LTC-USD":18.0,
 
         # Tier B — light trim where fills lagged; others unchanged
-        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":26.0, "NEAR-USD":20.0, "ATOM-USD":26.0,
+        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":26.0, "NEAR-USD":20.0, "TRAC-USD":24.0,
 
         # Tier C / thinner or slower — mostly unchanged (small trims only where safe)
-        "ALGO-USD":22.0, "XLM-USD":20.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0,
+        "ALGO-USD":22.0, "XLM-USD":20.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0, "TAO-USD":22.0,
 
         # Other altcoins(EXPERIMENTAL)
-        "IP-USD":22.0, "WLFI-USD":22.0, "FLOKI-USD":26.0, "PEPE-USD":28.0,  
+        "IP-USD":22.0, "WLFI-USD":22.0, "FLOKI-USD":24.0, "PEPE-USD":26.0, "BONK-USD":28.0, 
+        "SEI-USD":28.0, "SHIB-USD":20.0,
     })
 
 
@@ -153,5 +155,6 @@ class BotConfig:
     ema_deadband_bps: float = 6.0
     log_level: int = logging.INFO
     portfolio_id: Optional[str] = None
+    allow_position_fallback_for_avail = True
 
 CONFIG = BotConfig()

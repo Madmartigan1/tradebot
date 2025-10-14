@@ -8,6 +8,7 @@ PNL_DECIMALS = 8
 _default_state = (Path(__file__).resolve().parent / ".." / ".state").resolve()
 STATE_DIR = Path(os.getenv("BOT_STATE_DIR", str(_default_state)))
 
+
 try:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 except Exception:
