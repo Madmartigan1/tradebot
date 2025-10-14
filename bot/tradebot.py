@@ -1,6 +1,6 @@
 # bot/tradebot.py — v1.0.8
 # Adds:
-#  - Quartermaster exits (6% take-profit; time-in-trade stagnation)
+#  - Quartermaster exits (x% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
 #  - Non-invasive pre-check before EMA captain logic
 #  - Quartermaster looping safeguard
@@ -117,8 +117,8 @@ from .utils import (
     LastTradeTracker,
 )
 from .indicators import EMA, RSI, MACD
-from .orders import compute_maker_limit, decimals_from_inc
-from .strategy import AdvisorSettings, advisor_allows 
+from .orders import compute_maker_limit, decimals_from_inc, round_down_to_inc
+from .strategy import AdvisorSettings, advisor_allows
 
 class TradeBot:
     def __init__(self, cfg, api_key: str, api_secret: str, portfolio_id: Optional[str] = None):
@@ -221,6 +221,17 @@ class TradeBot:
             cur_conf,
         )
 
+        # Snapshot QM config so runs are self-documenting
+        logging.info(
+            "Quartermaster: take_profit_bps=%s | max_hold_hours=%s | respect_macd=%s "
+            "| flat_macd_abs_max=%s | shave_steps=%s | exits=MARKET_ONLY",
+            getattr(self.cfg, "take_profit_bps", 800),
+            getattr(self.cfg, "max_hold_hours", 48),
+            getattr(self.cfg, "quartermaster_respect_macd", True),
+            getattr(self.cfg, "flat_macd_abs_max", 0.40),
+            getattr(self.cfg, "full_exit_shave_increments", 1),
+        )
+
         # -------- Candle config / state --------
         # Back-compat: prefer new names, fall back to old
         self.candle_mode = str(getattr(self.cfg, "mode", getattr(self.cfg, "candle_mode", "ws"))).lower()
@@ -264,8 +275,9 @@ class TradeBot:
         # Increments (price/base)
         self.price_inc: Dict[str, float] = {}
         self.base_inc: Dict[str, float] = {}
+        self.min_market_base_size: Dict[str, float] = {}
         self._prime_increments()
-
+                        
         # Quote cache (for maker pricing)
         self.quotes = defaultdict(lambda: {"bid": None, "ask": None, "last": None})
 
@@ -273,6 +285,19 @@ class TradeBot:
         self._load_portfolio()
         from .persistence import ProcessedFills
         self._processed_fills = ProcessedFills(load_json(PROCESSED_FILLS_FILE, {}))
+
+        # Clamp/seed AFTER loading portfolio (so we don't get overwritten)
+        for pid in self.product_ids:
+            try:
+                live = float(self._get_live_available_base(pid))
+            except Exception:
+                live = -1.0
+            if live >= 0.0:
+                cache = float(self.positions.get(pid, 0.0))
+                if cache <= 0.0 and live > 0.0:
+                    self.positions[pid] = live        # seed cache from live
+                else:
+                    self.positions[pid] = min(cache, live)   # never exceed live
 
         # Optional: backfill indicators from REST candles to warm up
         if bool(getattr(self.cfg, "use_backfill", True)):
@@ -283,43 +308,86 @@ class TradeBot:
                 
     def _get_live_available_base(self, product_id: str) -> float:
         """
-        Prefer Advanced Trade 'trading-available' over generic funding 'available'.
-        Only fall back to local positions if cfg.allow_position_fallback_for_avail = True.
+        Prefer Advanced Trade 'trading-available' over generic funding 'available';
+        subtract any hold; paginate; pass portfolio_id; optional fallback to local position.
         """
         base = product_id.split("-")[0]
         try:
-            resp = self.rest.get_accounts()
-            body = getattr(resp, "to_dict", lambda: resp)()
-            for acc in body.get("accounts", []):
-                cur = acc.get("currency") or acc.get("asset")
-                if cur != base:
-                    continue
-                # Prefer trading-available shapes (SDKs vary)
-                trad = acc.get("trading_available_balance") or acc.get("available_for_trading")
-                if isinstance(trad, dict):
-                    val = trad.get("value")
-                else:
-                    val = trad
-                if val is None:
-                    # Fallback to funding 'available' only if trading field missing entirely
-                    avail = acc.get("available_balance")
-                    val = (avail.get("value") if isinstance(avail, dict) else avail) or acc.get("available")
-                return max(0.0, float(val))
+            params = {}
+            if getattr(self, 'portfolio_id', None):
+                params["portfolio_id"] = self.portfolio_id
+            cursor = None
+            while True:
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self.rest.get_accounts(**params)
+                body = getattr(resp, "to_dict", lambda: resp)() or {}
+                for acc in body.get("accounts", []):
+                    cur = acc.get("currency") or acc.get("asset")
+                    if cur != base:
+                        continue
+                    trad = acc.get("trading_available_balance") or acc.get("available_for_trading")
+                    val = trad.get("value") if isinstance(trad, dict) else trad
+                    if val is None:
+                        avail = acc.get("available_balance") or acc.get("available")
+                        val = avail.get("value") if isinstance(avail, dict) else avail
+                    try:
+                        val_f = float(val or 0.0)
+                    except Exception:
+                        val_f = 0.0
+                    hold = acc.get("hold") or acc.get("hold_balance") or 0.0
+                    try:
+                        hold_f = float(hold.get("value")) if isinstance(hold, dict) else float(hold or 0.0)
+                    except Exception:
+                        hold_f = 0.0
+                    return max(0.0, val_f - hold_f)
+                cursor = (
+                    body.get("cursor") or body.get("next_cursor")
+                    or (body.get("pagination") or {}).get("cursor")
+                )
+                if not cursor:
+                    break
         except Exception as e:
             logging.debug("get_accounts failed while reading live available for %s: %s", product_id, e)
 
-        # Be conservative: assume 0 unless the user explicitly opts into fallback.
         if bool(getattr(self.cfg, "allow_position_fallback_for_avail", False)):
             return max(0.0, float(self.positions.get(product_id, 0.0)))
         return 0.0
 
-    # -------------------- helpers & config --------------------
-    def _get_ema_params(self, pid: str) -> Tuple[int, int, int]:
-        ovr = getattr(self.cfg, "ema_params_per_product", {}).get(pid, {})
-        se = int(ovr.get("short_ema", getattr(self.cfg, "short_ema", 20)))
-        le = int(ovr.get("long_ema", getattr(self.cfg, "long_ema", 50)))
-        mt = int(ovr.get("min_candles", getattr(self.cfg, "min_candles", getattr(self.cfg, "min_ticks", 60))))
+    def _get_ema_params(self, product_id: str) -> Tuple[int, int, int]:
+        """
+        Returns (short_ema, long_ema, min_ticks_needed) for a given product.
+
+        - Uses CONFIG.short_ema / CONFIG.long_ema by default.
+        - If CONFIG.ema_params_per_product has an entry for product_id, it can
+          override with keys: {"short": int, "long": int} or {"short_ema","long_ema"}.
+        - min_ticks_needed ensures indicators are warmed up before trading:
+          max(long_ema + confirm_candles, CONFIG.min_candles).
+        """
+        # --- global defaults ---
+        se = int(getattr(self.cfg, "short_ema", 40))
+        le = int(getattr(self.cfg, "long_ema", 120))
+
+        # --- per-product override (optional) ---
+        per = getattr(self.cfg, "ema_params_per_product", {})
+        if isinstance(per, dict):
+            ov = per.get(product_id) or {}
+            if isinstance(ov, dict):
+                se = int(ov.get("short", ov.get("short_ema", se)))
+                le = int(ov.get("long",  ov.get("long_ema",  le)))
+
+        # guardrails
+        if se <= 0: se = 40
+        if le <= 1: le = max(120, se + 1)
+        if se >= le:  # keep short < long
+            se = max(1, min(se, le - 1))
+
+        confirm = int(getattr(self.cfg, "confirm_candles", 3))
+        min_cfg = int(getattr(self.cfg, "min_candles", max(60, le)))
+        mt = max(le + confirm, min_cfg)
+
         return se, le, mt
+
 
     def _prime_increments(self):
         for pid in self.product_ids:
@@ -327,12 +395,23 @@ class TradeBot:
                 prod = self.rest.get_product(product_id=pid)
                 body = getattr(prod, "to_dict", lambda: {})()
                 price_inc = body.get("price_increment") or body.get("quote_increment") or "0.01"
-                base_inc = body.get("base_increment") or "0.00000001"
+                base_inc  = body.get("base_increment")  or body.get("base_min_size")   or "0.00000001"
                 self.price_inc[pid] = float(price_inc)
                 self.base_inc[pid] = float(base_inc)
+                min_mkt = (
+                    body.get("min_market_base_size")
+                    or body.get("min_market_order_size")
+                    or body.get("base_min_market_size")
+                    or 0.0
+                )
+                try:
+                    self.min_market_base_size[pid] = float(min_mkt)
+                except Exception:
+                    self.min_market_base_size[pid] = 0.0
             except Exception:
                 self.price_inc[pid] = 0.01
                 self.base_inc[pid] = 1e-8
+                self.min_market_base_size[pid] = 0.0
 
     # -------------------- persistence --------------------
     def _load_portfolio(self):
@@ -365,7 +444,7 @@ class TradeBot:
             "entry_time": et
         })
     def _swab_log(self, detail: str) -> None:
-        logging.info("\n\nYO SWAB!\n\n%s", detail)
+        logging.info("\nYO SWAB!\n%s", detail)
         
     # -------------------- lifecycle --------------------
     def set_run_baseline(self):
@@ -644,9 +723,16 @@ class TradeBot:
                 logging.debug("Pre-SELL reconcile failed for %s: %s", product_id, e)
 
         # SELL guardrails: must hold position
-        if signal < 0 and self.positions[product_id] <= 0.0:
-            logging.info("Skip SELL %s: no position held.", product_id)
-            return
+        if signal < 0:
+            try:
+                live_avail = float(self._get_live_available_base(product_id))
+            except Exception:
+                live_avail = 0.0
+            if max(float(self.positions.get(product_id, 0.0)), live_avail) <= 0.0:
+                logging.info("Skip SELL %s: no position held (cache=%.10f live=%.10f).",
+                     product_id, float(self.positions.get(product_id, 0.0)), live_avail)
+                return
+
 
         # Optional hard stop: if enabled and below CB by X bps, force market exit now
         if signal < 0:
@@ -656,12 +742,30 @@ class TradeBot:
                 if cb > 0.0:
                     floor = cb * (1.0 - float(hs) / 10_000.0)
                     if price <= floor:
-                        held = max(0.0, float(self.positions.get(product_id, 0.0)))
+                        # Always cross-check with live-available before SELL sizing
+                        held_cache = max(0.0, float(self.positions.get(product_id, 0.0)))
+                        try:
+                            live_avail = float(self._get_live_available_base(product_id))
+                        except Exception:
+                            live_avail = -1.0
+                        held = held_cache
+                        if live_avail >= 0.0:
+                            held = min(held_cache, live_avail)
+                            # If cache was empty but live shows balance, seed cache for later logic
+                            if held_cache <= 0.0 and live_avail > 0.0:
+                                self.positions[product_id] = live_avail
+                        
                         if held > 0.0 and price > 0.0:
                             quote_usd = held * price
-                            ok, _ = self._submit_market_order(product_id, "SELL", quote_usd)
-                            if ok:
-                                self.last.stamp(product_id)
+                            logging.info(
+                                "[HARD STOP TRIGGER] Will attempt MARKET SELL %s after availability checks: "
+                                "last=%.8f floor=%.8f held=%.10f quote~$%.2f",
+                                product_id, price, floor, held, quote_usd
+                            )
+                            # Route through place_order so 'reason' is captured in _intent → trades.csv
+                            self.place_order(
+                                product_id, side="SELL", quote_usd=quote_usd, last_price=price, reason="stop_loss"
+                            )
                         return
 
         # Advisors (optional): veto only if clearly bad
@@ -685,7 +789,7 @@ class TradeBot:
         side = "BUY" if signal > 0 else "SELL"
         if side == "BUY" and remaining <= 0:
             if not self.daily_cap_reached_logged:
-                logging.info("\n***Daily BUY cap reached (%.2f). Skipping further BUYs.***\n", daily_cap)
+                logging.info("\n\n**********Daily BUY cap reached (%.2f). Skipping further BUYs.**********\n", daily_cap)
                 self.log_session_pnl()
                 self.daily_cap_reached_logged = True
                 self.session_footer_written = True
@@ -737,11 +841,11 @@ class TradeBot:
                 params["quote_size"] = f"{quote_usd:.2f}"
                 resp = self.rest.market_order_buy(**params)
             else:
-                # SELL: use base_size and clamp to held position
+                # SELL: use base_size and clamp to live-available position
                 held = max(0.0, float(self.positions.get(product_id, 0.0)))
                 live_avail = self._get_live_available_base(product_id)
                 held = min(held, live_avail)
-                # If there's effectively nothing live-available, bail early (avoid INSFUND spam)
+
                 try:
                     min_base = float(self.base_inc.get(product_id, 1e-8))
                 except Exception:
@@ -755,38 +859,54 @@ class TradeBot:
                         float(self.base_inc.get(product_id, 1e-8)),
                     )
                     return False, ValueError("No live-available base to sell")
+
                 last = float(self.quotes.get(product_id, {}).get("last") or 0.0)
                 intended_base = quote_usd / last if last > 0 else held
                 base_size = min(held, intended_base)
-                # Shave if this is effectively a full-bag exit
+
+                # Conditional full-exit shave that won't zero single-increment bags
                 try:
                     base_inc = float(self.base_inc.get(product_id, 1e-8))
-                    shave_steps = int(getattr(self.cfg, "full_exit_shave_increments", 2))
-                    if held > 0 and base_size > 0 and abs(base_size - held) <= (2 * base_inc + 1e-15):
-                        before = base_size
-                        # Swab shout (before cleanup)
-                        self._swab_log(
-                            f"Applying full-exit shave for {product_id}: intended={before:.10f}, "
-                            f"held={held:.10f}, inc={base_inc}, steps={shave_steps}…"
-                        )
-                        # Now do cleanup
-                        base_size = max(0.0, held - shave_steps * base_inc)
                 except Exception:
-                    pass
-                # --- Zero-size guard after shave (avoid pointless MARKET sell) ---
-                try:
-                    inc_for_log = float(self.base_inc.get(product_id, 1e-8))
-                except Exception:
-                    inc_for_log = 1e-8
+                    base_inc = 1e-8
+                shave_steps = int(getattr(self.cfg, "full_exit_shave_increments", 1))
+                if (
+                    shave_steps > 0 and held >= (shave_steps + 1) * base_inc and base_size > 0
+                    and abs(base_size - held) <= (2 * base_inc + 1e-15)
+                ):
+                    before = base_size
+                    self._swab_log(
+                        f"Applying full-exit shave for {product_id}: intended={before:.10f}, "
+                        f"held={held:.10f}, inc={base_inc}, steps={shave_steps}…"
+                    )
+                    base_size = max(base_inc, held - shave_steps * base_inc)
+
+                # Snap to increment & zero-size guard
+                inc_for_log = base_inc
+                base_size = round_down_to_inc(max(0.0, base_size), inc_for_log)
                 if base_size <= 0:
                     logging.info(
-                        "Skip SELL %s: base_size=0 after shave (held=%.10f, inc=%g).",
-                        product_id, held, inc_for_log
+                        "Skip SELL %s: base_size=0 after shave (held=%.10f, inc=%s).",
+                        product_id, float(held), str(inc_for_log),
                     )
-                    return False, ValueError("No base size to sell")                
-                b_dec = decimals_from_inc(self.base_inc.get(product_id, 1e-8))
-                params["base_size"] = f"{base_size:.{b_dec}f}"
+                    return False, ValueError("No base size to sell")
+
+                # Enforce min market base size if required
+                min_mkt = float(self.min_market_base_size.get(product_id, 0.0) or 0.0)
+                if min_mkt > 0.0 and base_size < min_mkt:
+                    if held >= min_mkt:
+                        base_size = round_down_to_inc(min(held, max(base_size, min_mkt)), inc_for_log)
+                    else:
+                        logging.info(
+                            "Skip SELL %s: below min_market_base_size (base_size=%.10f < %.10f, held=%.10f).",
+                            product_id, base_size, min_mkt, held
+                        )
+                        return False, ValueError("Below min_market_base_size")
+
+                dec = decimals_from_inc(inc_for_log)
+                params["base_size"] = f"{base_size:.{dec}f}"
                 resp = self.rest.market_order_sell(**params)
+
             # Detect previewed insufficient funds and throttle Quartermaster for this product
             ok = True
             try:
@@ -794,7 +914,6 @@ class TradeBot:
                 if body and (not body.get("success", True)):
                     err = (body.get("error_response") or {}).get("error") or ""
                     if str(err).upper().find("INSUFFICIENT_FUND") >= 0:
-                        # avoid hammering same product this candle/session
                         self._qm_last_ts[product_id] = time.time()
                         ok = False
             except Exception:
@@ -803,7 +922,9 @@ class TradeBot:
         except Exception as e:
             return False, e
 
+
     def place_order(self, product_id: str, side: str, quote_usd: float, last_price: float, reason: str = "ema_cross"):
+        logging.info("[INTENT] %s %s $%.2f (last=%.8f, reason=%s)", side.upper(), product_id, float(quote_usd or 0.0), float(last_price or 0.0), reason)
         side = side.upper()
         assert side in {"BUY", "SELL"}
 
@@ -826,9 +947,11 @@ class TradeBot:
         if side == "SELL":
             prefer_maker = bool(getattr(self.cfg, "prefer_maker_for_sells", prefer_maker))
 
-        # Quartermaster exits must execute immediately: force MARKET SELL
-        if side == "SELL" and reason in ("take_profit", "stagnation", "stop_loss"):
+        # Quartermaster & hard-stop exits must be immediate: force MARKET SELL
+        forced_market = (side == "SELL" and reason in ("take_profit", "stagnation", "stop_loss"))
+        if forced_market:
             prefer_maker = False
+            logging.info("[ATTEMPT] MARKET SELL for %s due to reason=%s", product_id, reason)
 
         if prefer_maker:
             q = self.quotes.get(product_id, {})
@@ -862,6 +985,9 @@ class TradeBot:
             ok, resp = self._submit_market_order(product_id, side, quote_usd)
 
         if not ok:
+            # If this was a forced market exit, be explicit that execution failed.
+            if 'forced_market' in locals() and forced_market:
+                logging.warning("[FAILED] MARKET SELL for %s (reason=%s) did not execute.", product_id, reason)
             logging.error("%s order FAILED for %s $%.2f: %s", side, product_id, quote_usd, resp)
             return
 
@@ -870,13 +996,12 @@ class TradeBot:
             self.spend.add(quote_usd)
         self.last.stamp(product_id)
 
+        # Success logging — only claim EXECUTED for forced-market sells after success
         try:
             body = getattr(resp, "to_dict", lambda: resp)()
             if side == "SELL":
-                # compute a few debug stats for clarity on failures
                 held_dbg = float(self.positions.get(product_id, 0.0))
                 try:
-                    # show live available rather than cached map
                     avail_dbg = float(self._get_live_available_base(product_id))
                 except Exception:
                     avail_dbg = -1.0
@@ -885,6 +1010,8 @@ class TradeBot:
                     "Live SELL %s $%.2f placed. held=%.10f avail=%.10f base_inc=%g Resp: %s (reason=%s)",
                     product_id, quote_usd, held_dbg, avail_dbg, base_inc_dbg, body, reason
                 )
+                if 'forced_market' in locals() and forced_market:
+                    logging.info("[EXECUTED] MARKET SELL %s (reason=%s)", product_id, reason)
             else:
                 logging.info("Live BUY %s $%.2f placed. Resp: %s (reason=%s)", product_id, quote_usd, body, reason)
         except Exception:
@@ -908,7 +1035,7 @@ class TradeBot:
                     "intent_price": float(last_price) if last_price else None,
                     "bid": q.get("bid"),
                     "ask": q.get("ask"),
-                    "reason": reason,  # NEW — propagate exit/entry reason to CSV later
+                    "reason": reason,  # propagate exit/entry reason to CSV later
                 }
             except Exception:
                 pass
@@ -922,9 +1049,17 @@ class TradeBot:
                 any_new = False
                 fee_total = 0.0
                 liq_flags = set()
+
+                # Sort immediate fills oldest → newest to keep CSV chronological
+                page = list(fb.get("fills", []) or [])
+                page.sort(
+                    key=lambda f: self._iso_to_dt(f.get("trade_time") or f.get("time"))
+                                  or datetime.min.replace(tzinfo=timezone.utc)
+                )
+
                 # Guard per-fill mutations + CSV to avoid races with reconcile thread
                 with self._state_lock:
-                    for f in fb.get("fills", []):
+                    for f in page:
                         fp = self._fill_fingerprint(f)
                         if self._processed_fills.has(fp):
                             continue
@@ -1028,6 +1163,15 @@ class TradeBot:
         side = f.get("side") or f.get("order_side") or ""
         return f"{oid}|{tid}|{pid}|{sz}|{px}|{fee}|{side}"
 
+    def _iso_to_dt(self, s: str | None):
+        """Parse '...Z' or ISO string to aware datetime in UTC; return None on failure."""
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
     def log_session_pnl(self):
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         live_run_delta = self.realized_pnl - self.run_pnl_baseline
@@ -1070,6 +1214,29 @@ class TradeBot:
         except Exception as e:
             logging.debug("Could not fetch recent fills: %s", e)
             return
+
+        # --- Enforce time window & chronological order (oldest → newest)
+        start_dt = end - timedelta(hours=lookback_hours)
+        end_dt = end
+
+        def _in_window(f):
+            dt = self._iso_to_dt(f.get("trade_time") or f.get("time"))
+            return (dt is not None) and (start_dt <= dt <= end_dt)
+
+        before_ct = len(fills)
+        fills = [f for f in fills if _in_window(f)]
+        dropped = before_ct - len(fills)
+
+        fills.sort(
+            key=lambda f: self._iso_to_dt(f.get("trade_time") or f.get("time"))
+                          or datetime.min.replace(tzinfo=timezone.utc)
+        )
+
+        if dropped > 0:
+            logging.info(
+                "Reconcile: dropped %d out-of-range fills (kept %d within %dh window).",
+                dropped, len(fills), lookback_hours
+            )
 
         changed = False
         for f in fills:
@@ -1182,6 +1349,19 @@ class TradeBot:
         # ---- Quartermaster pre-check (take-profit / time-in-trade) ----
         try:
             held_qty = max(0.0, float(self.positions.get(product_id, 0.0)))
+            # If local position is empty (e.g., buys were before our fills lookback),
+            # peek at live balances so Quartermaster uses a real number.
+            try:
+                live_avail = float(self._get_live_available_base(product_id))
+            except Exception:
+                live_avail = -1.0
+            if live_avail >= 0.0:
+                held_cache = held_qty
+                held_qty = min(held_cache, live_avail)
+                # If cache was empty but live shows a balance, seed cache
+                if held_cache <= 0.0 and live_avail > 0.0:
+                    self.positions[product_id] = live_avail
+
             if held_qty > 0.0:
                 entry_price = float(self.cost_basis.get(product_id, 0.0) or 0.0)
                 macd_hist = self._macd[product_id].hist if self.enable_advisors else None
@@ -1207,6 +1387,9 @@ class TradeBot:
                         return
 
                     quote_usd = held_qty * close_price
+                    logging.info("Quartermaster triggered SELL attempt %s: held=%.10f close=%.8f reason=%s",
+                                 product_id, held_qty, close_price, qm_reason)
+                    # Actually place the exit order
                     self.place_order(product_id, side="SELL", quote_usd=quote_usd,
                                      last_price=close_price, reason=qm_reason)
                     self._qm_last_ts[product_id] = now_ts
@@ -1233,4 +1416,3 @@ class TradeBot:
             logging.exception("reconcile_now failed: %s", e)
         finally:
             self._reconciling = False
-
