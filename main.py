@@ -1,4 +1,4 @@
-# main.py (v1.0.8 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
+# main.py (v1.0.9 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
@@ -74,7 +74,7 @@ def _load_keys_from_envfile():
             "Missing COINBASE_API_KEY / COINBASE_API_SECRET in environment "
             f"(loaded from {env_path})."
         )
-        sys.exit(1)
+        _finalize_and_exit(1)
 
     return api_key, api_secret, portfolio_id
 
@@ -89,7 +89,7 @@ def _elapsed_autotune_once_with_bot(
     One-shot AutoTune run after AUTOTUNE_ELAPSED_REFRESH_HOURS, reusing the
     existing authenticated REST client from the running TradeBot instance.
     """
-    logger = logging.getLogger("autotune")
+    logger = logging.getLogger("autotune-elapsed")
 
     if not getattr(CONFIG, "autotune_enabled", False):
         return
@@ -102,13 +102,15 @@ def _elapsed_autotune_once_with_bot(
             break
         time.sleep(step)
 
-    # Temporary lookback override (optional)
-    _orig_lb = getattr(CONFIG, "autotune_lookback_hours", 18)
-    _elapsed_lb = getattr(CONFIG, "elapsed_autotune_lookback_hours", _orig_lb)
+    # If shutdown was requested during (or just after) the wait window, bail out cleanly.
+    if _shutdown_once.is_set() or getattr(bot, "stop_requested", False):
+        try:
+            logger.info("Skipped AUTOTUNE(elapsed): Exiting bot...")
+        except Exception:
+            pass
+        return
 
     try:
-        setattr(CONFIG, "autotune_lookback_hours", _elapsed_lb)
-
         logger.info("AUTOTUNE (elapsed): starting one-shot update…")
         summary = autotune_config(
             CONFIG,
@@ -119,9 +121,8 @@ def _elapsed_autotune_once_with_bot(
             preview_only=getattr(CONFIG, "autotune_preview_only", True),
         )
         logger.info(
-            "AUTOTUNE(elapsed %dh using %dh lookback): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
+            "AUTOTUNE(elapsed %dh): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
             AUTOTUNE_ELAPSED_REFRESH_HOURS,
-            _elapsed_lb,
             summary.get("mode"),
             summary.get("portfolio_regime"),
             summary.get("winner"),
@@ -129,33 +130,77 @@ def _elapsed_autotune_once_with_bot(
             float(summary.get("alpha") or 0.0),
         )
         logger.info("AUTOTUNE(elapsed) votes: %s", summary.get("portfolio_vote"))
-        logger.info("AUTOTUNE(elapsed) knob changes: %s", summary.get("global_changes"))
-        logger.info("AUTOTUNE(elapsed) offsets (post 3d KPI nudges): %s", summary.get("offsets_changed"))
+        logger.info("AUTOTUNE(elapsed) knob changes: %s\n", summary.get("global_changes"))
+        logger.info("AUTOTUNE(elapsed) offsets (post 3d KPI nudges): %s\n", summary.get("offsets_changed"))
         if summary.get("disabled_products"):
-            logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s", summary.get("disabled_products"))
+            logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s\n", summary.get("disabled_products"))
         logger.info("AUTOTUNE (elapsed): complete.")
     except Exception as e:
         logger.exception("AUTOTUNE (elapsed) failed: %s", e)
-    finally:
-        # Always restore original lookback
-        setattr(CONFIG, "autotune_lookback_hours", _orig_lb)
+
+def _request_shutdown(bot: TradeBot | None, code: int = 0):
+    if not _shutdown_once.is_set():
+        _shutdown_once.set()
+        try:
+            if bot is not None:
+                bot.stop_requested = True
+        except Exception:
+            pass
+        try:
+            if bot is not None and hasattr(bot, "close"):
+                bot.close()
+        except Exception:
+            pass
+    _finalize_and_exit(code)
 
 
 def main():
     log = _setup_logging()
-
-    # POSIX signals only on non-Windows; on Windows rely on KeyboardInterrupt below
-    if os.name != "nt":
-        def _sigterm(_signo, _frame):
-            _shutdown_once.set()
-        signal.signal(signal.SIGINT, _sigterm)
-        signal.signal(signal.SIGTERM, _sigterm)
-
     # --- v1.0.4 key loading (from APIkeys.env) ---
     api_key, api_secret, portfolio_id = _load_keys_from_envfile()
 
     # Construct the bot (TradeBot builds REST+WS client using api_key/api_secret)
-    bot = TradeBot(CONFIG, api_key=api_key, api_secret=api_secret, portfolio_id=portfolio_id)
+    try:
+        bot = TradeBot(CONFIG, api_key=api_key, api_secret=api_secret, portfolio_id=portfolio_id)
+    except Exception as e:
+        logging.getLogger("tradebot").exception("Failed to construct TradeBot: %s", e)
+        _request_shutdown(None, 1)
+        
+    # Log & exit on any uncaught exceptions (main thread)
+    def _sys_excepthook(exc_type, exc, tb):
+        if exc_type is KeyboardInterrupt:
+            return
+        logging.getLogger("tradebot").exception("Uncaught exception: %s", exc)
+        _request_shutdown(bot, 1)
+    sys.excepthook = _sys_excepthook
+
+    # Same for background threads (Python 3.8+)
+    if hasattr(threading, "excepthook"):
+        def _thread_excepthook(args):
+            if isinstance(args.exc_value, KeyboardInterrupt):
+                return
+            logging.getLogger("tradebot").exception(
+                "Uncaught exception in thread %s: %s", args.thread.name, args.exc_value
+            )
+            _request_shutdown(bot, 1)
+        threading.excepthook = _thread_excepthook
+    
+    # POSIX signals (after bot exists so we can shut it down cleanly).
+    # On Windows, we rely on KeyboardInterrupt below.
+    if os.name != "nt":
+        def _sigterm(_signo, _frame):
+            if _shutdown_once.is_set(): return
+            _request_shutdown(bot, 0)
+        signal.signal(signal.SIGINT, _sigterm)
+        signal.signal(signal.SIGTERM, _sigterm)
+    else:
+        # Optional: treat Ctrl+Break like Ctrl+C on Windows
+        if hasattr(signal, "SIGBREAK"):
+            def _sigbreak(_signo, _frame):
+                if _shutdown_once.is_set(): return
+                logging.getLogger("tradebot").info("Ctrl+Break received; shutting down...")
+                _request_shutdown(bot, 0)
+            signal.signal(signal.SIGBREAK, _sigbreak)
 
     # Expose the authenticated REST client so autotune.py reuses the same client for the 18h lookback
     setattr(CONFIG, "_rest", getattr(bot, "rest", None))
@@ -192,20 +237,24 @@ def main():
                 float(summary.get("alpha") or 0.0),
             )
             log.info("AUTOTUNE votes: %s", summary.get("portfolio_vote"))
-            log.info("AUTOTUNE knob changes: %s", summary.get("global_changes"))
-            log.info("AUTOTUNE offsets (post 3d KPI nudges): %s", summary.get("offsets_changed"))
+            log.info("AUTOTUNE knob changes: %s\n", summary.get("global_changes"))
+            log.info("AUTOTUNE offsets (post 3d KPI nudges): %s\n", summary.get("offsets_changed"))
             if summary.get("disabled_products"):
                 cands = summary.get("disabled_products") or []
                 details = summary.get("disabled_details") or {}
                 if cands:
                     pretty = ", ".join(f"{p}({details.get(p,'')})" if p in details else p for p in cands)
-                    log.info("AUTOTUNE (advisory only) would disable: %s", pretty)
+                    log.info("AUTOTUNE (advisory only) would disable: %s\n", pretty)
         except Exception as e:
             log.warning("Autotune failed (continuing with current config): %s", e)
 
     # 3) Open websocket + subscribe (prints “Subscribed … / WS ready”)
-    bot.open()
-
+    try:
+        bot.open()
+    except Exception as e:
+        log.exception("Failed to open websocket: %s", e)
+        _request_shutdown(bot, 1)
+        
     # Optional: one-shot elapsed AutoTune refresh
     if AUTOTUNE_ELAPSED_REFRESH_ENABLED and getattr(CONFIG, "autotune_enabled", False):
         t = threading.Thread(
@@ -247,17 +296,14 @@ def main():
     # Blocking WS loop — Windows-friendly Ctrl+C
     try:
         bot.run_ws_forever()
+        # If the loop ever returns normally, exit cleanly.
+        _request_shutdown(bot, 0)
     except KeyboardInterrupt:
-        logging.getLogger("tradebot").info("Ctrl+C pressed; shutting down...")
-        _shutdown_once.set()               # <— make background threads exit promptly
-        try:
-            if hasattr(bot, "close"):
-                bot.close()
-        finally:
-            sys.exit(0)
-    finally:
-        _finalize_and_exit()
-
+        logging.getLogger("tradebot").info("Ctrl+C received; waiting for websocket loop to exit...")
+        _request_shutdown(bot, 0)
+    except Exception as e:
+        logging.getLogger("tradebot").exception("Fatal error in run loop: %s", e)
+        _request_shutdown(bot, 1)
 
 if __name__ == "__main__":
     main()
