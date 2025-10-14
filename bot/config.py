@@ -15,7 +15,7 @@ class BotConfig:
     ])
     
     # Dry run used for paper trading. Set to False for live trading
-    dry_run: bool = False
+    dry_run: bool = True
     # Max amount per trade and total trade amount per run
     usd_per_order: float = 30
     daily_spend_cap_usd: float = 180.0  # buys stop after cap; sells continue
@@ -74,7 +74,7 @@ class BotConfig:
 
 
     # -------- Candles v1.0.2 --------
-    mode: str = "local"                # "ws" server side candle builds or "local" if you want local aggregation, ws is fine by default.
+    mode: str = "ws"                # "ws" server side candle builds or "local" if you want local aggregation, ws is fine by default.
     candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
     min_candles: int = 120             # wait for indicator warm-up
     confirm_candles: int = 3           # consecutive cross confirms
