@@ -3,6 +3,39 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+## [1.1.0] - 2025-10-17
+### Added
+- **API response normalization** via `_resp_ok()`:  
+  Unified success detection for both `market` and `limit` orders, ensuring that rejected post-only LIMITs no longer count toward daily spend.
+- **Expanded Quartermaster module**:
+  - Dual-condition exit logic (take-profit and stagnation) fully integrated.
+  - Dust and minimum-market-size suppression window (default 30 min) prevents repeated micro-sell attempts.
+  - Internal cooldown and timestamp throttling for deterministic, single-action exits.
+- **Live balance seeding**: if portfolio cache is empty but a live balance exists, the bot now auto-seeds the position to stay in sync after restarts.
+- **Local candle settle queue**:  
+  Closed candles in `local` mode are queued with a configurable settle delay (`local_close_settle_ms`, default 150 ms) to prevent boundary races.
+- **Swab diagnostic hooks**:  
+  Added explicit `YO SWAB!` log calls during processed-fill pruning and hygiene events.
+
+### Changed
+- **Maker and market submission paths** now call `_resp_ok()` and return `(ok, resp)` consistently.
+- **SpendTracker logic**: BUY spend only advances when `_resp_ok()` returns `True`; post-only rejections no longer consume daily quota.
+- **Quartermaster exits** trigger through `place_order()` so that `exit_reason` is logged correctly in `trades.csv`.
+- **Candle flush discipline**: `_flush_local_settle()` runs before and after every WS ticker message for tighter timing.
+- **Hold-time analytics**: `entry_time` timestamps persist cleanly through restarts and are cleared on full position exit.
+
+### Fixed
+- **False positive daily cap triggers** from previewed or rejected orders.
+- **Dust edge cases** that could re-fire Quartermaster exits on sub-increment balances.
+- **Floating-point shave drift** when full-exit rounding approached the increment boundary.
+
+### Notes
+- Backward-compatible with v1.0.9 portfolio and fill files.  
+- `trades.csv` gains no new columns (headers unchanged from v1.0.9).  
+- The `_resp_ok()` helper is now the authoritative gate for all order-success checks.
+
+
+
 ## [1.0.9] - 2025-10-14
 ### Added
 - **Graceful shutdown on all platforms** with unified `_request_shutdown()` for `Ctrl+C`/`SIGTERM` and thread exceptions; optional `SIGBREAK` on Windows.
