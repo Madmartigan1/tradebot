@@ -1,4 +1,4 @@
-# bot/autotune.py (v1.0.8) — telemetry + stronger BLEND tuning + caller-controlled lookback
+# bot/autotune.py (v1.0.9) — telemetry + stronger BLEND tuning + caller-controlled lookback
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone

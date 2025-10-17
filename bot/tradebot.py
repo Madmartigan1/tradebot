@@ -1,4 +1,4 @@
-# bot/tradebot.py — v1.0.8
+# bot/tradebot.py — v1.1.0
 # Adds:
 #  - Quartermaster exits (x% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
@@ -9,13 +9,15 @@ import json
 import logging
 import time
 import uuid
+import csv
 import threading
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Tuple
-
+from .utils import RestProxy
 from coinbase.rest import RESTClient
 from coinbase.websocket import WSClient
+
 
 # --- Candle helpers ---
 class CandleBuilder:
@@ -123,6 +125,10 @@ from .strategy import AdvisorSettings, advisor_allows
 class TradeBot:
     def __init__(self, cfg, api_key: str, api_secret: str, portfolio_id: Optional[str] = None):
         self.cfg = cfg
+        # Local-candle settle queue: (release_ts, product_id, start_sec, close_price)
+        self._local_settle_q = deque()
+        # default settle delay (ms); override via CONFIG.local_close_settle_ms if present
+        self._local_settle_ms = int(getattr(self.cfg, "local_close_settle_ms", 150))
         self.portfolio_id = portfolio_id if portfolio_id is not None else getattr(cfg, "portfolio_id", None)
         self._balances: Dict[str, float] = {}
         
@@ -133,34 +139,53 @@ class TradeBot:
         self._primed = set()             # first crossover primes only (no trade)
         self._pending = {}               # product_id -> {"rel": +/-1/0, "count": N}
         self._qm_last_ts = defaultdict(float)  # last time Quartermaster SELL fired per product
-
+        self._qm_dust_suppress_until = defaultdict(float)  # suppress dust exits until epoch time
+        
         # Thread locking to prevent races in state + CSV writes
         self._state_lock = threading.RLock()
 
         # REST/WS
         self.api_key = api_key
         self.api_secret = api_secret
-        self.rest = RESTClient(api_key=api_key, api_secret=api_secret, rate_limit_headers=True)
         
-        # --- sanity: trades.csv header check (runs once per boot) ---
+        # Base REST client
+        self.rest = RESTClient(api_key=api_key, api_secret=api_secret, rate_limit_headers=True)
+        # Wrap REST with retry+pacing proxy
         try:
-            import os, csv
-            from .constants import TRADES_CSV_FILE
-            if os.path.exists(TRADES_CSV_FILE):
-                with open(TRADES_CSV_FILE, "r", encoding="utf-8", newline="") as f:
-                    first = f.readline()
-                    if first:  # only check non-empty files
-                        hdr = next(csv.reader([first]))
-                        expected = [
-                            "ts","order_id","side","product","size","price","quote_usd","fee","liquidity","pnl",
-                            "position_after","cost_basis_after","intent_price","slippage_abs","slippage_bps",
-                            "hold_time_sec","entry_reason","exit_reason"
-                        ]
-                        if [h.strip() for h in hdr] != expected:
-                            logging.warning("trades.csv header mismatch: found=%s expected=%s", hdr, expected)
-        except Exception as e:
-            logging.debug("trades.csv header check skipped: %s", e)
-
+            self.rest = RestProxy(
+                self.rest,
+                attempts=int(getattr(cfg, "rest_retry_attempts", 3)),
+                backoff_min_ms=int(getattr(cfg, "rest_retry_backoff_min_ms", 200)),
+                backoff_max_ms=int(getattr(cfg, "rest_retry_backoff_max_ms", 600)),
+                retry_statuses=list(getattr(cfg, "rest_retry_on_status", [429,500,502,503,504])),
+                rps_soft_limit=float(getattr(cfg, "rest_rps_soft_limit", 8.0)),
+            )
+        except Exception:
+            pass
+            
+        # Initialize WS client/handler
+        self._init_ws()
+        
+    def _flush_local_settle(self, now_ts: float | None = None):
+        """Emit any settled local candles whose release time has arrived."""
+        if str(getattr(self.cfg, "mode", "ws")).lower() != "local":
+            return
+        if not self._local_settle_q:
+            return
+        if now_ts is None:
+            now_ts = time.time()
+        while self._local_settle_q and self._local_settle_q[0][0] <= now_ts:
+            _, pid, start, close = self._local_settle_q.popleft()
+            try:
+                self._on_candle_close(pid, start, close)
+            except Exception as e:
+                logging.debug("Local settle flush failed for %s: %s", pid, e)
+        return
+        
+    # -------------------------
+    # Websocket & runtime state
+    # -------------------------
+    def _init_ws(self):
         def on_msg(raw):
             try:
                 msg = json.loads(raw)
@@ -168,9 +193,9 @@ class TradeBot:
                 logging.debug("Non-JSON WS message: %s", raw)
                 return
             self.on_ws_message(msg)
+        self.ws = WSClient(api_key=self.api_key, api_secret=self.api_secret, on_message=on_msg)
 
-        self.ws = WSClient(api_key=api_key, api_secret=api_secret, on_message=on_msg)
-
+        
         # Products
         self.product_ids = list(getattr(self.cfg, "product_ids", []))
         if not self.product_ids:
@@ -181,7 +206,9 @@ class TradeBot:
         self.long: Dict[str, EMA] = {}
 
         # Advisors
-        self.enable_advisors: bool = bool(getattr(cfg, "enable_advisors", getattr(cfg, "use_advisors", False)))
+        self.enable_advisors: bool = bool(
+            getattr(self.cfg, "enable_advisors", getattr(self.cfg, "use_advisors", False))
+        )
         self._rsi = {p: RSI(period=int(getattr(self.cfg, "rsi_period", 14))) for p in self.product_ids}
         self._macd = {
             p: MACD(
@@ -191,15 +218,15 @@ class TradeBot:
             )
             for p in self.product_ids
         }
-
+    
         # One-sided RSI/MACD veto settings
         self.advisor_settings = AdvisorSettings(
             enable_rsi=self.enable_advisors,
             rsi_period=int(getattr(self.cfg, "rsi_period", 14)),
-            rsi_buy_min=0.0,  # unused by current veto
+            rsi_buy_min=0.0,
             rsi_buy_max=float(getattr(self.cfg, "rsi_buy_max", getattr(self.cfg, "rsi_sell_ceiling", 70.0))),
             rsi_sell_min=float(getattr(self.cfg, "rsi_sell_min", getattr(self.cfg, "rsi_buy_floor", 30.0))),
-            rsi_sell_max=100.0,  # unused by current veto
+            rsi_sell_max=100.0,
             enable_macd=self.enable_advisors,
             macd_fast=int(getattr(self.cfg, "macd_fast", 12)),
             macd_slow=int(getattr(self.cfg, "macd_slow", 26)),
@@ -209,10 +236,10 @@ class TradeBot:
             macd_sell_max=float(getattr(self.cfg, "macd_sell_max", 0.0)),
         )
 
-        # Log current settings snapshot (confirm reads live cfg; no cached _confirm_need)
+        # Log current settings snapshot
         cur_conf = int(getattr(self.cfg, "confirm_candles", getattr(self.cfg, "confirm_ticks", 2)))
         logging.info(
-            "Advisors: RSI buy<=%.1f / sell>=%-.1f (period=%d) | MACD %d/%d/%d, thresholds buy>=%.2f bps sell<=%.2f bps | "
+            "Advisors: RSI buy<=%.1f / sell>=%.1f (period=%d) | MACD %d/%d/%d, thresholds buy>=%.2f bps sell<=%.2f bps | "
             "deadband=%.2f bps | confirm=%d",
             self.advisor_settings.rsi_buy_max, self.advisor_settings.rsi_sell_min, self.advisor_settings.rsi_period,
             self.advisor_settings.macd_fast, self.advisor_settings.macd_slow, self.advisor_settings.macd_signal,
@@ -233,9 +260,7 @@ class TradeBot:
         )
 
         # -------- Candle config / state --------
-        # Back-compat: prefer new names, fall back to old
         self.candle_mode = str(getattr(self.cfg, "mode", getattr(self.cfg, "candle_mode", "ws"))).lower()
-        # map candle_interval -> seconds if provided, else read granularity_sec
         ci = str(getattr(self.cfg, "candle_interval", "")).lower().strip()
         _ci2sec = {"1m":60,"5m":300,"15m":900,"30m":1800,"1h":3600,"2h":7200,"4h":14400,"6h":21600,"1d":86400}
         self.granularity_sec = int(_ci2sec.get(ci, int(getattr(self.cfg, "granularity_sec", 300))))
@@ -254,7 +279,11 @@ class TradeBot:
         # Spend/cooldown
         self.spend = SpendTracker()
         self.last = LastTradeTracker()
-
+        logging.info(
+            "Spend cap=$%.2f | spent today=$%.2f",
+            float(getattr(self.cfg, "daily_spend_cap_usd", 0.0)),
+            self.spend.today_total(),
+        )
         # Portfolio from fills
         self.positions: Dict[str, float] = defaultdict(float)
         self.cost_basis: Dict[str, float] = defaultdict(float)
@@ -269,6 +298,9 @@ class TradeBot:
         self.session_start = datetime.now(timezone.utc)
         self._last_msg_ts = time.time()
         self._reconnect_tries = 0
+
+        # Reconnect backoff bounds (seconds)
+        self._ws_backoff_max = int(getattr(self.cfg, "ws_reconnect_backoff_max", 60))
         self._intent = {}  # order_id -> intent metadata (price at signal etc.)
         self._entry_time = defaultdict(lambda: None)  # per-product entry timestamp when pos goes 0 -> >0
 
@@ -277,7 +309,7 @@ class TradeBot:
         self.base_inc: Dict[str, float] = {}
         self.min_market_base_size: Dict[str, float] = {}
         self._prime_increments()
-                        
+
         # Quote cache (for maker pricing)
         self.quotes = defaultdict(lambda: {"bid": None, "ask": None, "last": None})
 
@@ -305,6 +337,86 @@ class TradeBot:
                 self._backfill_seed_indicators()
             except Exception as e:
                 logging.debug("Backfill seeding failed: %s", e)
+    
+    # -------------------------
+    # API response normalization
+    # -------------------------
+    def _resp_ok(self, resp) -> bool:
+        """Return True only if the Coinbase API indicates a successful accept.
+        Tolerates SDK objects or raw dicts."""
+        try:
+            body = getattr(resp, "to_dict", lambda: resp)() or {}
+        except Exception:
+            return False
+        # Hard failure if explicit error is present
+        if body.get("success") is False:
+            return False
+        if body.get("error_response"):
+            return False
+        # Treat presence of success_response or order_id as success
+        if body.get("success_response") or body.get("order_id"):
+            return True
+        # Otherwise, be conservative
+        return False
+    
+    # -------------------------
+    # Maker reprice (optional)
+    # -------------------------
+    def _maybe_reprice_resting(self, product_id: str, rel: int):
+        if not getattr(self.cfg, "maker_reprice_enabled", False):
+            return
+        # Only when we have a known resting order for this product with same signal polarity
+        info = self._pending.get(product_id)
+        if not info or int(info.get("rel", 0)) != int(rel):
+            return
+        # Age check: >= one closed candle
+        if getattr(self.cfg, "maker_reprice_on_close_only", True):
+            # called from candle close path → OK
+            pass
+        # Count limit
+        rc = info.setdefault("reprices", 0)
+        if rc >= int(getattr(self.cfg, "maker_reprice_max", 1)):
+            return
+        # Cancel and repost at fresh maker price
+        try:
+            oid = info.get("order_id")
+            if oid:
+                self.rest.cancel_orders(order_ids=[oid])
+                info["order_id"] = None
+        except Exception as e:
+            logging.debug("Reprice: cancel failed %s: %s", product_id, e)
+        
+        # Rebuild price/size and place again (maker)
+        try:
+            side = "BUY" if rel > 0 else "SELL"
+            last = float(self.quotes.get(product_id, {}).get("last") or 0.0)
+            bid  = float(self.quotes.get(product_id, {}).get("bid") or 0.0)
+            ask  = float(self.quotes.get(product_id, {}).get("ask") or 0.0)
+            offset = getattr(self.cfg, "maker_offset_bps_per_product", {}).get(
+                product_id, float(getattr(self.cfg, "maker_offset_bps", 5.0))
+            )
+            price, base_size = compute_maker_limit(
+                product_id=product_id,
+                side=side,
+                last_price=last,
+                price_inc=float(self.price_inc.get(product_id, 0.01)),
+                base_inc=float(self.base_inc.get(product_id, 1e-8)),
+                usd_per_order=float(getattr(self.cfg, "usd_per_order", 1.0)),
+                offset_bps=offset,
+                bid=bid,
+                ask=ask,
+            )
+            if side == "BUY":
+                resp = self.rest.limit_order_gtc_buy(product_id=product_id, limit_price=f"{price:.8f}", base_size=f"{base_size:.8f}", post_only=True)
+            else:
+                resp = self.rest.limit_order_gtc_sell(product_id=product_id, limit_price=f"{price:.8f}", base_size=f"{base_size:.8f}", post_only=True)
+            info["reprices"] = rc + 1
+            info["order_id"] = (resp or {}).get("success_response", {}).get("order_id")
+            logging.info("Reprice: %s %s at %s (%s) reprices=%d",
+                         side, product_id, price, base_size, info["reprices"])
+        except Exception as e:
+            logging.warning("Reprice: repost failed %s: %s", product_id, e)
+        return
                 
     def _get_live_available_base(self, product_id: str) -> float:
         """
@@ -479,10 +591,13 @@ class TradeBot:
             except Exception as e:
                 logging.debug("Backfill failed for %s: %s", pid, e)
 
-    def open(self):
-        self.ws.open()
+    def _subscribe_all(self):
+        """Subscribe ticker always; optionally WS candles; best-effort heartbeats."""
         # Always keep ticker for quotes/maker logic
-        self.ws.ticker(product_ids=self.product_ids)
+        try:
+            self.ws.ticker(product_ids=self.product_ids)
+        except TypeError:
+            self.ws.ticker(self.product_ids)
         # Candles if requested via WS; otherwise we will locally aggregate from ticker
         if self.candle_mode == "ws":
             try:
@@ -501,41 +616,66 @@ class TradeBot:
             logging.debug("Heartbeats channel not available; continuing without it.")
         logging.info("Websocket subscriptions ready.")
 
+    def open(self):
+        self.ws.open()
+        self._subscribe_all()
+
     def run_ws_forever(self):
         """
-        Block here running the SDK's internal run loop.
-        Tries run_forever_with_exception_check with flexible signature; falls back to run_forever().
+        Run the SDK's internal loop and auto-reconnect on close/errors.
+        Tries run_forever_with_exception_check; falls back to run_forever().
         """
-        fn = getattr(self.ws, "run_forever_with_exception_check", None)
-        if not callable(fn):
-            logging.info("WSClient.run_forever_with_exception_check not found; using run_forever().")
-            self.ws.run_forever()
-            return
-
-        import inspect
-        retries = int(getattr(self.cfg, "runloop_max_retries", 5))
-        try:
-            sig = inspect.signature(fn)
-            params = list(sig.parameters.keys())
-
-            if not params:
-                # No arguments supported
-                fn()
-            elif "max_retries" in params:
-                fn(max_retries=retries)
-            elif "retries" in params:
-                fn(retries=retries)
-            elif "attempts" in params:
-                fn(attempts=retries)
-            else:
-                # Try single positional int; if that fails, call with no args
+        base_sleep = int(getattr(self.cfg, "ws_reconnect_backoff_base", 5))
+        max_tries = int(getattr(self.cfg, "ws_reconnect_max_tries", 999999))
+        tries = 0
+        while not self.stop_requested and tries < max_tries:
+            fn = getattr(self.ws, "run_forever_with_exception_check", None)
+            try:
+                if callable(fn):
+                    import inspect
+                    sig = inspect.signature(fn)
+                    params = list(sig.parameters.keys())
+                    if not params:
+                        fn()
+                    elif "max_retries" in params:
+                        fn(max_retries=int(getattr(self.cfg, "runloop_max_retries", 5)))
+                    elif "retries" in params:
+                        fn(retries=int(getattr(self.cfg, "runloop_max_retries", 5)))
+                    elif "attempts" in params:
+                        fn(attempts=int(getattr(self.cfg, "runloop_max_retries", 5)))
+                    else:
+                        try:
+                            fn(int(getattr(self.cfg, "runloop_max_retries", 5)))
+                        except TypeError:
+                            fn()
+                else:
+                    logging.info("WSClient.run_forever_with_exception_check not found; using run_forever().")
+                    self.ws.run_forever()
+                # If we got here, the loop returned (connection closed)
+                if self.stop_requested:
+                    break
+                raise RuntimeError("WS loop exited; will reconnect.")
+            except Exception as e:
+                tries += 1
+                self._reconnect_tries = tries
+                sleep_s = min(self._ws_backoff_max, max(1, base_sleep * (2 ** min(tries - 1, 5))))
+                logging.error("Websocket loop error/exit (%s). Reconnecting in %ds (try %d)…", e, sleep_s, tries)
+                # Best-effort close without writing session footer:
                 try:
-                    fn(retries)
-                except TypeError:
-                    fn()
-        except Exception as e:
-            logging.info("run_forever_with_exception_check signature mismatch (%s); using run_forever().", e)
-            self.ws.run_forever()
+                    self.ws.close()
+                except Exception:
+                    pass
+                time.sleep(sleep_s)
+                # Re-open and re-subscribe
+                try:
+                    self.ws.open()
+                    self._subscribe_all()
+                    self._last_msg_ts = time.time()
+                    continue
+                except Exception as e2:
+                    logging.error("Websocket re-open failed: %s", e2)
+                    time.sleep(sleep_s)
+                    continue
 
     def close(self):
         if not self.session_footer_written:
@@ -563,8 +703,24 @@ class TradeBot:
             "hold_time_sec","entry_reason","exit_reason"
         ]
         quote_usd = (size * price) if (size is not None and price is not None) else None
+        # If an order was reconciled after a restart (or via cancel/repost) the in-memory
+        # intent might be missing. Since BUYs only come from the EMA path right now,
+        # default the reason to "ema_cross" so CSV is always informative.
+        try:
+            s_up = (side or "").upper()
+            if s_up == "BUY" and not entry_reason:
+                logging.debug("CSV: missing entry_reason for BUY %s (order_id=%s); defaulting to ema_cross.",
+                              product_id, order_id)
+                entry_reason = "ema_cross"
+            elif s_up == "SELL" and not exit_reason:
+                # Keep blank (various SELL reasons) but note for debugging
+                logging.debug("CSV: missing exit_reason for SELL %s (order_id=%s).", product_id, order_id)
+        except Exception:
+            pass
+        
         slippage_abs = None
         slippage_bps = None
+        
         try:
             if intent_price and price:
                 if side == "BUY":
@@ -592,10 +748,11 @@ class TradeBot:
             new_file = not path.exists()
             # single-writer guard (prevents interleaved lines)
             with self._state_lock:
-                with open(path, "a", newline="") as f:
+                with open(path, "a", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f, lineterminator="\n")
                     if new_file:
-                        f.write(",".join(headers) + "\n")
-                    f.write(",".join(map(str, row)) + "\n")
+                        w.writerow(headers)
+                    w.writerow(row)
         except Exception as e:
             logging.debug("CSV append failed: %s", e)
 
@@ -608,6 +765,8 @@ class TradeBot:
         if ch == "ticker":
             events = msg.get("events") or []
             ts_now = _parse_ws_iso(msg.get("timestamp"))
+            # Flush any previously queued local candles first
+            self._flush_local_settle(now_ts=ts_now)
             for ev in events:
                 for t in ev.get("tickers", []):
                     pid = t.get("product_id")
@@ -634,7 +793,14 @@ class TradeBot:
                         closed = self._builders[pid].update(p, ts_now)
                         if closed is not None:
                             start, o, h, l, c, v = closed
-                            self._on_candle_close(pid, start, c)
+                            logging.debug("LOCAL CANDLE %s @ %ds close=%.8f", pid, self.granularity_sec, c)
+                            if self._local_settle_ms > 0:
+                                release = ts_now + (self._local_settle_ms / 1000.0)
+                                self._local_settle_q.append((release, pid, start, c))
+                            else:
+                                self._on_candle_close(pid, start, c)
+            # After processing this WS message, try another flush
+            self._flush_local_settle(now_ts=ts_now)
 
         elif ch == "candles":
             events = msg.get("events") or []
@@ -682,16 +848,25 @@ class TradeBot:
 
         # Confirmation logic
         if rel == 0:
-            # neutral: don't carry confirmations across flats
-            self._pending[product_id] = {"rel": 0, "count": 0}
+            # LOCAL-ONLY: allow one neutral (band) candle to preserve confirmations
+            st = self._pending.get(product_id, {"rel": 0, "count": 0, "band_grace": 0})
+            local_mode = (str(getattr(self.cfg, "mode", "ws")).lower() == "local")
+            if local_mode and st.get("rel", 0) != 0 and int(st.get("band_grace", 0)) == 0:
+                # First neutral after a directional run → keep count, mark grace used
+                st["band_grace"] = 1
+                self._pending[product_id] = st
+            else:
+                # Multiple neutrals or not in a run → reset as before
+                self._pending[product_id] = {"rel": 0, "count": 0, "band_grace": 0}
             return
 
-        st = self._pending.get(product_id)
+        st = self._pending.get(product_id, {"rel": 0, "count": 0, "band_grace": 0})
         if not st or st["rel"] != rel:
             # new direction or first time seeing this product this session
-            st = {"rel": rel, "count": 1}
+            st = {"rel": rel, "count": 1, "band_grace": 0}
         else:
             st["count"] += 1
+            st["band_grace"] = 0  # any directional candle clears the grace
 
         # optional cap to keep count bounded in long trends
         st["count"] = min(st["count"], 32)
@@ -705,7 +880,7 @@ class TradeBot:
             return
 
         # confirmed cross; reset pending
-        self._pending[product_id] = {"rel": 0, "count": 0}
+        self._pending[product_id] = {"rel": 0, "count": 0, "band_grace": 0}
         if rel == prev:
             return
         self._trend[product_id] = rel
@@ -827,7 +1002,7 @@ class TradeBot:
                 resp = self.rest.limit_order_gtc_buy(**params)
             else:
                 resp = self.rest.limit_order_gtc_sell(**params)
-            return True, resp
+            return self._resp_ok(resp), resp
         except Exception as e:
             return False, e
 
@@ -863,13 +1038,21 @@ class TradeBot:
                 last = float(self.quotes.get(product_id, {}).get("last") or 0.0)
                 intended_base = quote_usd / last if last > 0 else held
                 base_size = min(held, intended_base)
-
-                # Conditional full-exit shave that won't zero single-increment bags
                 try:
                     base_inc = float(self.base_inc.get(product_id, 1e-8))
                 except Exception:
                     base_inc = 1e-8
+                
+                # --- FLOAT-SAFE EPSILON CLAMP (pre-round) ---
+                # If we’re within half an increment of the held amount, snap to held
+                if abs(base_size - held) <= (0.5 * base_inc):
+                    base_size = held
+                # Nudge by a tiny epsilon relative to increment so 1*inc doesn't fall just below inc
+                EPS = base_inc * 1e-6
+                base_size = max(0.0, base_size + EPS)
                 shave_steps = int(getattr(self.cfg, "full_exit_shave_increments", 1))
+                
+                shaved = False
                 if (
                     shave_steps > 0 and held >= (shave_steps + 1) * base_inc and base_size > 0
                     and abs(base_size - held) <= (2 * base_inc + 1e-15)
@@ -880,17 +1063,25 @@ class TradeBot:
                         f"held={held:.10f}, inc={base_inc}, steps={shave_steps}…"
                     )
                     base_size = max(base_inc, held - shave_steps * base_inc)
-
+                    shaved = True
+                    
                 # Snap to increment & zero-size guard
                 inc_for_log = base_inc
                 base_size = round_down_to_inc(max(0.0, base_size), inc_for_log)
-                if base_size <= 0:
+                if base_size < inc_for_log - 1e-18:
                     logging.info(
-                        "Skip SELL %s: base_size=0 after shave (held=%.10f, inc=%s).",
-                        product_id, float(held), str(inc_for_log),
+                        "Skip SELL %s: base_size below increment %s(held=%.10f, inc=%s).",
+                        product_id,
+                        "after shave " if shaved else "after rounding ",
+                        float(held), str(inc_for_log),
                     )
+                    # mark dust suppression to avoid repeated attempts
+                    try:
+                        self._qm_dust_suppress_until[product_id] = time.time() + 30 * 60
+                    except Exception:
+                        pass
                     return False, ValueError("No base size to sell")
-
+                    
                 # Enforce min market base size if required
                 min_mkt = float(self.min_market_base_size.get(product_id, 0.0) or 0.0)
                 if min_mkt > 0.0 and base_size < min_mkt:
@@ -901,24 +1092,32 @@ class TradeBot:
                             "Skip SELL %s: below min_market_base_size (base_size=%.10f < %.10f, held=%.10f).",
                             product_id, base_size, min_mkt, held
                         )
+                        # mark dust suppression to avoid repeated attempts
+                        try:
+                            self._qm_dust_suppress_until[product_id] = time.time() + 30 * 60
+                        except Exception:
+                            pass
                         return False, ValueError("Below min_market_base_size")
 
                 dec = decimals_from_inc(inc_for_log)
                 params["base_size"] = f"{base_size:.{dec}f}"
                 resp = self.rest.market_order_sell(**params)
-
-            # Detect previewed insufficient funds and throttle Quartermaster for this product
-            ok = True
+                
+            # Normalize success based on response content
+            ok = self._resp_ok(resp)
+            # Special-case insufficient funds preview → mark not ok and throttle QM
             try:
-                body = getattr(resp, "to_dict", lambda: resp)()
+                body = getattr(resp, "to_dict", lambda: resp)() or {}
                 if body and (not body.get("success", True)):
                     err = (body.get("error_response") or {}).get("error") or ""
-                    if str(err).upper().find("INSUFFICIENT_FUND") >= 0:
+                    if "INSUFFICIENT_FUND" in str(err).upper():
                         self._qm_last_ts[product_id] = time.time()
                         ok = False
             except Exception:
                 pass
             return ok, resp
+
+            
         except Exception as e:
             return False, e
 
@@ -1378,6 +1577,28 @@ class TradeBot:
                     # cooldown + throttle + dust guard
                     cooldown_s = int(getattr(self.cfg, "per_product_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
                     now_ts = time.time()
+                    # Dust/threshold suppression window honored
+                    if now_ts < float(self._qm_dust_suppress_until[product_id] or 0.0):
+                        return
+                    # Require at least one increment or min-market base size (optionally buffered)
+                    try:
+                        base_inc = float(self.base_inc.get(product_id, 1e-8))
+                    except Exception:
+                        base_inc = 1e-8
+                    min_mkt = float(self.min_market_base_size.get(product_id, 0.0) or 0.0)
+                    sell_floor = max(base_inc, min_mkt)
+                    buffer_mult = 1.0  # keep exact-inc allowed; raise to 1.1 for extra safety if desired
+                    sell_required = sell_floor * buffer_mult
+                    if held_qty + 1e-18 < sell_required:
+                        suppress_min = 30  # configurable if needed
+                        self._qm_dust_suppress_until[product_id] = now_ts + suppress_min * 60
+                        logging.info(
+                            "Quartermaster: suppressing SELL %s for %d min "
+                            "(held=%.10f < required=%.10f, inc=%g, min_mkt=%.10f).",
+                            product_id, suppress_min, held_qty, sell_required, base_inc, min_mkt
+                        )
+                        return
+                        
                     if not self.last.ok(product_id, cooldown_s):
                         return
                     if now_ts - float(self._qm_last_ts[product_id] or 0.0) < min(60, cooldown_s):
