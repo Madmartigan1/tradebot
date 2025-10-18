@@ -1,8 +1,39 @@
-# ----v1.0.9----
+# ----v1.1.0----
 # bot/config.py
 import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+def validate_config(cfg: "BotConfig"):
+    """
+    Coerce obvious misconfig values to safe ranges and emit warnings once.
+    """
+    import logging
+    safe = True
+    if getattr(cfg, "short_ema", 40) >= getattr(cfg, "long_ema", 120):
+        logging.warning("Config: short_ema(%s) >= long_ema(%s); swapping to safe 40/120.",
+                        getattr(cfg, "short_ema", None), getattr(cfg, "long_ema", None))
+        cfg.short_ema, cfg.long_ema = 40, 120
+        safe = False
+    if not (1 <= getattr(cfg, "confirm_candles", 3) <= 5):
+        logging.warning("Config: confirm_candles out of [1,5]; clamping.")
+        cfg.confirm_candles = max(1, min(5, int(cfg.confirm_candles)))
+        safe = False
+    if not (0 < getattr(cfg, "ema_deadband_bps", 6.0) <= 20.0):
+        logging.warning("Config: ema_deadband_bps out of (0,20]; clamping.")
+        cfg.ema_deadband_bps = max(0.5, min(20.0, float(cfg.ema_deadband_bps)))
+        safe = False
+    # Maker reprice bounds
+    if getattr(cfg, "maker_reprice_max", 1) < 0:
+        cfg.maker_reprice_max = 0
+        safe = False
+    # REST soft limit sanity
+    if getattr(cfg, "rest_rps_soft_limit", 8.0) <= 0:
+        cfg.rest_rps_soft_limit = 8.0
+        safe = False
+    if not safe:
+        logging.info("Config validation applied safe coercions.")
+    return cfg
 
 @dataclass
 class BotConfig:
@@ -15,10 +46,18 @@ class BotConfig:
     ])
     
     # Dry run used for paper trading. Set to False for live trading
-    dry_run: bool = True
+    dry_run: bool = False
     # Max amount per trade and total trade amount per run
     usd_per_order: float = 30
-    daily_spend_cap_usd: float = 180.0  # buys stop after cap; sells continue
+    daily_spend_cap_usd: float = 240.0  # buys stop after cap; sells continue
+    
+    # -------- Candles v1.1.0 --------
+    mode: str = "ws"                # "ws" server side candle builds or "local" if you want local aggregation, ws is fine by default.
+    candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
+    min_candles: int = 120             # wait for indicator warm-up
+    confirm_candles: int = 3           # consecutive cross confirms
+    use_backfill: bool = True
+    warmup_candles: int = 200
 
     # --- v1.0.3: Autotune (startup-only) ---
     autotune_enabled: bool = True
@@ -28,7 +67,7 @@ class BotConfig:
     # How many hours of historical FILL data to sync during portfolio reconciliation.
     # - Used at: startup, periodic mid-session sweeps, and right-before SELL (guard).
     # - Affects ONLY portfolio/PNL/KPI backfill — NOT candles/indicators/AutoTune.
-    # - Mid-session/on-demand reconcile is clamped to 6–48h for safety:
+    # - Mid-session/on-demand reconcile is clamped to 6–168h for safety:
     #     effective_hours = min(48, max(6, lookback_hours))
     # - Startup reconcile is NOT clamped and will honor the full value.
     lookback_hours: int = 72
@@ -56,30 +95,21 @@ class BotConfig:
     autotune_vote_min_candles: int = 144
     # ------------------------------------------------------
     
-    # Currenly a NO-OP as it was planned but eliminated due to flapping risks.
+    # Currently a NO-OP as it was planned but eliminated due to flapping risks.
     #elapsed_autotune_lookback_hours: int = 6
     
     # Quartermaster exits
-    enable_quartermaster = True
-    take_profit_bps = 800          # 8%
-    max_hold_hours = 36            # ⟵ was 24; now 36
-    stagnation_close_bps = 200     # 2%
-    flat_macd_abs_max = 0.40
-    quartermaster_respect_macd = True
+    enable_quartermaster: bool = True
+    take_profit_bps: int = 800          # 8%
+    max_hold_hours: int = 36            # ⟵ was 24; now 36
+    stagnation_close_bps: int = 200     # 2%
+    flat_macd_abs_max: float = 0.40
+    quartermaster_respect_macd: bool = True
     
     # --- v1.0.3: Reconciliation during the session ---
     mid_reconcile_enabled: bool = True
     mid_reconcile_interval_minutes: int = 60  # hourly sweep
     reconcile_on_sell_attempt: bool = True    # quick sweep right before SELL
-
-
-    # -------- Candles v1.0.2 --------
-    mode: str = "ws"                # "ws" server side candle builds or "local" if you want local aggregation, ws is fine by default.
-    candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
-    min_candles: int = 120             # wait for indicator warm-up
-    confirm_candles: int = 3           # consecutive cross confirms
-    use_backfill: bool = True
-    warmup_candles: int = 200
 
     # EMA (global)
     short_ema: int = 40                # good for 5m candles
@@ -88,14 +118,14 @@ class BotConfig:
     # Advisors (RSI/MACD)
     enable_advisors: bool = True
     rsi_period: int = 14
-    rsi_buy_max: float = 65.0          # BUY only if RSI ≤ 60
-    rsi_sell_min: float = 35.0         # SELL only if RSI ≥ 40
+    rsi_buy_max: float = 65.0          # BUY only if RSI ≤ 65
+    rsi_sell_min: float = 35.0         # SELL only if RSI ≥ 35
 
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    macd_buy_min: float = +2.0         # BUY only if MACD ≥ +3.0 bps
-    macd_sell_max: float = -2.0        # SELL only if MACD ≤ −3.0 bps
+    macd_buy_min: float = +2.0         # BUY only if MACD ≥ +2.0 bps
+    macd_sell_max: float = -2.0        # SELL only if MACD ≤ −2.0 bps
 
     # Ops / Risk
     per_product_cooldown_s: int = 600   # Wait time in seconds, per coin, before it trades again
@@ -156,5 +186,28 @@ class BotConfig:
     log_level: int = logging.INFO
     portfolio_id: Optional[str] = None
     allow_position_fallback_for_avail = True
+    full_exit_shave_increments: int = 1
+    
+    # --- WS reconnect/backoff knobs ---
+    ws_reconnect_backoff_base: int = 5
+    ws_reconnect_backoff_max: int = 60
+    ws_reconnect_max_tries: int = 999999
+    runloop_max_retries: int = 5
+
+    # --- REST retry + pacing knobs ---
+    rest_retry_attempts: int = 3
+    rest_retry_backoff_min_ms: int = 200
+    rest_retry_backoff_max_ms: int = 600
+    rest_retry_on_status: List[int] = field(default_factory=lambda: [429,500,502,503,504])
+    rest_rps_soft_limit: float = 8.0
+
+    # --- Quartermaster dust guard knobs (already effective even if not exposed) ---
+    qm_dust_suppress_minutes: int = 30
+    qm_sell_buffer_mult: float = 1.0
+
+    # --- Maker reprice (optional) ---
+    maker_reprice_enabled: bool = False
+    maker_reprice_max: int = 1
+    maker_reprice_on_close_only: bool = True 
 
 CONFIG = BotConfig()

@@ -8,7 +8,7 @@ import signal
 from typing import Optional
 from dotenv import load_dotenv
 
-from bot.config import CONFIG
+from bot.config import CONFIG, validate_config
 from bot.autotune import autotune_config
 from bot.tradebot import TradeBot
 
@@ -156,6 +156,9 @@ def _request_shutdown(bot: TradeBot | None, code: int = 0):
 
 def main():
     log = _setup_logging()
+    # Validate + coerce the global CONFIG in place
+    validate_config(CONFIG)
+    
     # --- v1.0.4 key loading (from APIkeys.env) ---
     api_key, api_secret, portfolio_id = _load_keys_from_envfile()
 
