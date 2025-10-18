@@ -50,6 +50,8 @@ Together they form a chain of command:
 ## 📖 Documentation
 - **Full User Guide (PDF):** [docs/OpsManual.pdf](docs/OpsManual.pdf)
 - More docs:
+  - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+  - [docs/RUNBOOK.md](docs/RUNBOOK.md)
   - [USAGE.md](USAGE.md)
   - [CONTRIBUTING.md](CONTRIBUTING.md)
   - [CHANGELOG.md](CHANGELOG.md)
