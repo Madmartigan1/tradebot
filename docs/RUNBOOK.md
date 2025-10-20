@@ -2,7 +2,7 @@
 
 > Version: v1.1.0
 
-This runbook covers setup, startup, monitoring, and common issues. It assumes the codebase and config you provided.
+This runbook covers setup, startup, monitoring, and common issues.
 
 ---
 
