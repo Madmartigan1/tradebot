@@ -1,4 +1,4 @@
-# bot/autotune.py (v1.0.9) — telemetry + stronger BLEND tuning + caller-controlled lookback
+# bot/autotune.py (v1.1.1) — telemetry + stronger BLEND tuning + caller-controlled lookback
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -199,7 +199,7 @@ REGIME_TARGETS = {
         "rsi_sell_min": 30.0,
         "macd_buy_min": 2.5,
         "macd_sell_max": -1.5,
-        "ema_deadband_bps": 5.0,
+        "ema_deadband_bps": 8.0,
     },
 }
 CLAMPS_BY_REGIME: Dict[str, Dict[str, Tuple[Optional[float], Optional[float]]]] = {

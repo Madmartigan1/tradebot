@@ -1,9 +1,10 @@
-# bot/tradebot.py — v1.1.0
+# bot/tradebot.py — v1.1.1
 # Adds:
 #  - Quartermaster exits (x% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
 #  - Non-invasive pre-check before EMA captain logic
 #  - Quartermaster looping safeguard
+#  - Watchdog used to monitor connectivity 
 
 import json
 import logging
@@ -168,7 +169,7 @@ class TradeBot:
         
     def _flush_local_settle(self, now_ts: float | None = None):
         """Emit any settled local candles whose release time has arrived."""
-        if str(getattr(self.cfg, "mode", "ws")).lower() != "local":
+        if self.candle_mode != "local":
             return
         if not self._local_settle_q:
             return
@@ -268,13 +269,25 @@ class TradeBot:
         self._last_candle_start: Dict[str, int | None] = {p: None for p in self.product_ids}
         self._cur_candle_close: Dict[str, float | None] = {p: None for p in self.product_ids}
         self._builders: Dict[str, CandleBuilder] = {p: CandleBuilder(self.granularity_sec) for p in self.product_ids}
-
+        
+        # Visibility: make candle mode explicit in logs
+        logging.info("Candle mode: %s (interval=%ds)", self.candle_mode.upper(), self.granularity_sec)
+        
         # EMA objects and per-product minimum candles
         for p in self.product_ids:
             se, le, mt = self._get_ema_params(p)
             self.short[p] = EMA(se)
             self.long[p] = EMA(le)
             self.min_ticks_per_product[p] = mt
+
+        # --- Candle-stall watchdog state ---
+        # Last observed *closed* candle time per product (epoch seconds).
+        self._last_candle_close_ts: Dict[str, float] = {p: 0.0 for p in self.product_ids}
+        # Consider stalled if no close for N * granularity_sec (configurable).
+        self._stall_candle_factor = int(getattr(self.cfg, "stall_candle_factor", 3))
+        # Escalation counters across the session.
+        self._stall_hits = 0          # consecutive stalls (resubscribe → reconnect)
+        self._stall_total = 0         # lifetime stalls (optional flip-to-local threshold)
 
         # Spend/cooldown
         self.spend = SpendTracker()
@@ -298,7 +311,13 @@ class TradeBot:
         self.session_start = datetime.now(timezone.utc)
         self._last_msg_ts = time.time()
         self._reconnect_tries = 0
-
+        self._last_ping_ts = 0.0
+        self._last_subscribe_ts = time.time()
+        self._idle_reconnects = 0
+        # Telemetry/heartbeat
+        self._last_heartbeat_ts = 0.0
+        # Counts candles closed since last heartbeat (rolled up in HB log)
+        self._candles_closed = 0
         # Reconnect backoff bounds (seconds)
         self._ws_backoff_max = int(getattr(self.cfg, "ws_reconnect_backoff_max", 60))
         self._intent = {}  # order_id -> intent metadata (price at signal etc.)
@@ -333,6 +352,8 @@ class TradeBot:
 
         # Optional: backfill indicators from REST candles to warm up
         if bool(getattr(self.cfg, "use_backfill", True)):
+            logging.info("Seeding indicators from REST candles (warmup_candles=%d, interval=%ds)…",
+                         int(getattr(self.cfg, "warmup_candles", 200)), self.granularity_sec)
             try:
                 self._backfill_seed_indicators()
             except Exception as e:
@@ -359,64 +380,6 @@ class TradeBot:
         # Otherwise, be conservative
         return False
     
-    # -------------------------
-    # Maker reprice (optional)
-    # -------------------------
-    def _maybe_reprice_resting(self, product_id: str, rel: int):
-        if not getattr(self.cfg, "maker_reprice_enabled", False):
-            return
-        # Only when we have a known resting order for this product with same signal polarity
-        info = self._pending.get(product_id)
-        if not info or int(info.get("rel", 0)) != int(rel):
-            return
-        # Age check: >= one closed candle
-        if getattr(self.cfg, "maker_reprice_on_close_only", True):
-            # called from candle close path → OK
-            pass
-        # Count limit
-        rc = info.setdefault("reprices", 0)
-        if rc >= int(getattr(self.cfg, "maker_reprice_max", 1)):
-            return
-        # Cancel and repost at fresh maker price
-        try:
-            oid = info.get("order_id")
-            if oid:
-                self.rest.cancel_orders(order_ids=[oid])
-                info["order_id"] = None
-        except Exception as e:
-            logging.debug("Reprice: cancel failed %s: %s", product_id, e)
-        
-        # Rebuild price/size and place again (maker)
-        try:
-            side = "BUY" if rel > 0 else "SELL"
-            last = float(self.quotes.get(product_id, {}).get("last") or 0.0)
-            bid  = float(self.quotes.get(product_id, {}).get("bid") or 0.0)
-            ask  = float(self.quotes.get(product_id, {}).get("ask") or 0.0)
-            offset = getattr(self.cfg, "maker_offset_bps_per_product", {}).get(
-                product_id, float(getattr(self.cfg, "maker_offset_bps", 5.0))
-            )
-            price, base_size = compute_maker_limit(
-                product_id=product_id,
-                side=side,
-                last_price=last,
-                price_inc=float(self.price_inc.get(product_id, 0.01)),
-                base_inc=float(self.base_inc.get(product_id, 1e-8)),
-                usd_per_order=float(getattr(self.cfg, "usd_per_order", 1.0)),
-                offset_bps=offset,
-                bid=bid,
-                ask=ask,
-            )
-            if side == "BUY":
-                resp = self.rest.limit_order_gtc_buy(product_id=product_id, limit_price=f"{price:.8f}", base_size=f"{base_size:.8f}", post_only=True)
-            else:
-                resp = self.rest.limit_order_gtc_sell(product_id=product_id, limit_price=f"{price:.8f}", base_size=f"{base_size:.8f}", post_only=True)
-            info["reprices"] = rc + 1
-            info["order_id"] = (resp or {}).get("success_response", {}).get("order_id")
-            logging.info("Reprice: %s %s at %s (%s) reprices=%d",
-                         side, product_id, price, base_size, info["reprices"])
-        except Exception as e:
-            logging.warning("Reprice: repost failed %s: %s", product_id, e)
-        return
                 
     def _get_live_available_base(self, product_id: str) -> float:
         """
@@ -615,67 +578,169 @@ class TradeBot:
         except Exception:
             logging.debug("Heartbeats channel not available; continuing without it.")
         logging.info("Websocket subscriptions ready.")
+        self._last_subscribe_ts = time.time()
 
     def open(self):
         self.ws.open()
         self._subscribe_all()
+        
+    def _ws_ping_best_effort(self):
+        try:
+            fn = getattr(self.ws, "ping", None)
+            if callable(fn):
+                fn()
+        except Exception:
+            pass
+
+    def _force_reconnect(self, reason: str):
+        # Count *all* forced reconnects so flip-to-local can key off them if desired
+        try:
+            self._reconnect_tries += 1
+            if isinstance(reason, str) and reason.lower().startswith("idle"):
+                self._idle_reconnects += 1
+        except Exception:
+            pass
+        try:
+            self.ws.close()
+        except Exception:
+            pass
+        time.sleep(1.0)
+        try:
+            self.ws.open()
+            self._subscribe_all()
+            self._last_msg_ts = time.time()
+            self._last_ping_ts = 0.0          # allow immediate ping
+            self._last_subscribe_ts = time.time()  # belt-and-suspenders (also set in _subscribe_all)
+            logging.warning("WS reconnected (%s).", reason)
+        except Exception as e:
+            logging.error("WS reconnect failed (%s): %s", reason, e)
+
+    def _maybe_warn_and_recover_idle(self, now_ts: float | None = None):
+        if now_ts is None:
+            now_ts = time.time()
+        idle = now_ts - float(self._last_msg_ts or 0.0)
+        warn_s = int(getattr(self.cfg, "ws_idle_warn_s", 45))
+        rc_s  = int(getattr(self.cfg, "ws_idle_reconnect_s", 120))
+        if idle >= warn_s and idle < rc_s:
+            # throttle WARNs to once per minute
+            if int(idle) % 60 == 0:
+                logging.warning("WS idle for %ds (no messages).", int(idle))
+        if idle >= rc_s:
+            self._force_reconnect(f"idle {int(idle)}s")
+            # optional: repeated trouble → flip to local candles
+            flip_after = int(getattr(self.cfg, "ws_idle_flip_to_local_after", 0))
+            if flip_after > 0 and self._reconnect_tries >= flip_after:
+                current_mode = self.candle_mode
+                if current_mode != "local":
+                    logging.warning(
+                        "WS unstable (%d reconnects). Switching candle mode to LOCAL aggregation.",
+                        self._reconnect_tries
+                    )
+                    self.candle_mode = "local"
 
     def run_ws_forever(self):
         """
-        Run the SDK's internal loop and auto-reconnect on close/errors.
-        Tries run_forever_with_exception_check; falls back to run_forever().
+        Run the SDK loop with housekeeping: ping, periodic resubscribe, idle watchdog.
         """
         base_sleep = int(getattr(self.cfg, "ws_reconnect_backoff_base", 5))
-        max_tries = int(getattr(self.cfg, "ws_reconnect_max_tries", 999999))
+        max_tries  = int(getattr(self.cfg, "ws_reconnect_max_tries", 999999))
         tries = 0
         while not self.stop_requested and tries < max_tries:
             fn = getattr(self.ws, "run_forever_with_exception_check", None)
             try:
                 if callable(fn):
                     import inspect
-                    sig = inspect.signature(fn)
-                    params = list(sig.parameters.keys())
-                    if not params:
-                        fn()
-                    elif "max_retries" in params:
-                        fn(max_retries=int(getattr(self.cfg, "runloop_max_retries", 5)))
-                    elif "retries" in params:
-                        fn(retries=int(getattr(self.cfg, "runloop_max_retries", 5)))
-                    elif "attempts" in params:
-                        fn(attempts=int(getattr(self.cfg, "runloop_max_retries", 5)))
+                    # prefer a short-yielding loop if supported
+                    if "sleep_seconds" in inspect.signature(fn).parameters:
+                        fn(sleep_seconds=1.0)
                     else:
-                        try:
-                            fn(int(getattr(self.cfg, "runloop_max_retries", 5)))
-                        except TypeError:
-                            fn()
+                        fn()
                 else:
-                    logging.info("WSClient.run_forever_with_exception_check not found; using run_forever().")
-                    self.ws.run_forever()
-                # If we got here, the loop returned (connection closed)
-                if self.stop_requested:
-                    break
-                raise RuntimeError("WS loop exited; will reconnect.")
+                    # fall back to run_forever() briefly, then regain control for housekeeping
+                    run = getattr(self.ws, "run_forever", None)
+                    if callable(run):
+                        try:
+                            run(timeout=2.0)
+                        except TypeError:
+                            run()
+                    else:
+                        raise RuntimeError("WS client has no run loop")
+
+                # ---- HOUSEKEEPING TICK ----
+                now = time.time()
+                # best-effort ping
+                ping_every = int(getattr(self.cfg, "ws_ping_interval_s", 30))
+                if ping_every > 0 and (now - getattr(self, "_last_ping_ts", 0.0)) >= ping_every:
+                    self._ws_ping_best_effort()
+                    self._last_ping_ts = now
+                # periodic resubscribe
+                resub_every = int(getattr(self.cfg, "ws_resubscribe_interval_s", 900))
+                if resub_every > 0 and (now - getattr(self, "_last_subscribe_ts", 0.0)) >= resub_every:
+                    logging.info("Reissuing WS subscriptions (periodic resubscribe).")
+                    self._subscribe_all()
+                # idle watchdog (warn/reconnect/optional flip)
+                self._maybe_warn_and_recover_idle(now)
+                # --- Candle-stall watchdog (candles not progressing even if WS is "alive") ---
+                try:
+                    stall_s = int(self._stall_candle_factor) * int(self.granularity_sec)
+                    stalled = []
+                    for pid, last_ts in self._last_candle_close_ts.items():
+                        if last_ts and (now - float(last_ts)) >= stall_s:
+                            stalled.append(pid)
+                    if stalled:
+                        logging.warning(
+                            "Candle stall detected for %s (>%ds without a close). Forcing resubscribe.",
+                            ", ".join(sorted(set(stalled))), stall_s
+                        )
+                        # Lightweight first step: resubscribe
+                        self._subscribe_all()
+                        # Escalate to hard reconnect after N consecutive stall hits
+                        esc_after = int(getattr(self.cfg, "stall_hard_reconnect_after", 2))
+                        self._stall_hits += 1
+                        if self._stall_hits >= max(1, esc_after):
+                            self._force_reconnect("candle stall")
+                            self._stall_hits = 0
+                            # Optional: after repeated stalls overall, flip to local candles
+                            flip_after = int(getattr(self.cfg, "stall_flip_to_local_after", 0))
+                            self._stall_total += 1
+                            if flip_after > 0 and self.candle_mode != "local" and self._stall_total >= flip_after:
+                                logging.warning("Repeated candle stalls. Switching candle mode to LOCAL aggregation.")
+                                self.candle_mode = "local"
+                    else:
+                        # Healthy progress resets the consecutive stall counter
+                        self._stall_hits = 0
+                except Exception as _stall_e:
+                    logging.debug("Stall watchdog check failed: %s", _stall_e)
+                # healthy loop → reset backoff
+                tries = 0
+                # ---------- Low-noise telemetry heartbeat ----------
+                # One compact line every telemetry_heartbeat_s seconds (default: 1800s = 30min)
+                try:
+                    hb_every = int(getattr(self.cfg, "telemetry_heartbeat_s", 1800))
+                except Exception:
+                    hb_every = 1800
+                last_hb = float(getattr(self, "_last_heartbeat_ts", 0.0) or 0.0)
+                if hb_every > 0 and (now - last_hb) >= hb_every:
+                    since = int(now - float(self._last_msg_ts or 0.0))
+                    cc = int(getattr(self, "_candles_closed", 0) or 0)
+                    logging.info(
+                        "HB: last WS msg %ds ago | candles_closed+%d | mode=%s | idle_reconnects=%d | reconnect_tries=%d",
+                        since, cc, self.candle_mode.upper(),
+                        int(getattr(self, "_idle_reconnects", 0)),
+                        int(getattr(self, "_reconnect_tries", 0)),
+                    )
+                    self._candles_closed = 0
+                    self._last_heartbeat_ts = now
+                # ---------------------------------------------------
             except Exception as e:
                 tries += 1
                 self._reconnect_tries = tries
                 sleep_s = min(self._ws_backoff_max, max(1, base_sleep * (2 ** min(tries - 1, 5))))
                 logging.error("Websocket loop error/exit (%s). Reconnecting in %ds (try %d)…", e, sleep_s, tries)
-                # Best-effort close without writing session footer:
-                try:
-                    self.ws.close()
-                except Exception:
-                    pass
                 time.sleep(sleep_s)
-                # Re-open and re-subscribe
-                try:
-                    self.ws.open()
-                    self._subscribe_all()
-                    self._last_msg_ts = time.time()
-                    continue
-                except Exception as e2:
-                    logging.error("Websocket re-open failed: %s", e2)
-                    time.sleep(sleep_s)
-                    continue
+                # hard reconnect sequence (close → open → resubscribe)
+                self._force_reconnect("loop error/exit")
+
 
     def close(self):
         if not self.session_footer_written:
@@ -803,6 +868,9 @@ class TradeBot:
             self._flush_local_settle(now_ts=ts_now)
 
         elif ch == "candles":
+            # If we flipped to LOCAL, ignore WS candle frames to avoid double-processing.
+            if self.candle_mode != "ws":
+                return
             events = msg.get("events") or []
             for ev in events:
                 for c in ev.get("candles", []):
@@ -850,7 +918,7 @@ class TradeBot:
         if rel == 0:
             # LOCAL-ONLY: allow one neutral (band) candle to preserve confirmations
             st = self._pending.get(product_id, {"rel": 0, "count": 0, "band_grace": 0})
-            local_mode = (str(getattr(self.cfg, "mode", "ws")).lower() == "local")
+            local_mode = (self.candle_mode == "local")
             if local_mode and st.get("rel", 0) != 0 and int(st.get("band_grace", 0)) == 0:
                 # First neutral after a directional run → keep count, mark grace used
                 st["band_grace"] = 1
@@ -1175,6 +1243,23 @@ class TradeBot:
                 except Exception:
                     live_avail = held
                 base_size = min(base_size, held, live_avail)
+                try:
+                    base_inc = float(self.base_inc.get(product_id, 1e-8))
+                except Exception:
+                    base_inc = 1e-8
+                min_mkt = float(self.min_market_base_size.get(product_id, 0.0) or 0.0)
+                # Round down to increment
+                base_size = round_down_to_inc(max(0.0, base_size), base_inc)
+                # Enforce min market base size if defined
+                if min_mkt > 0.0 and base_size < min_mkt:
+                    if held >= min_mkt:
+                        base_size = round_down_to_inc(min(held, max(base_size, min_mkt)), base_inc)
+                    else:
+                        logging.info(
+                            "Skip maker SELL %s: below min_market_base_size (base_size=%.10f < %.10f, held=%.10f).",
+                            product_id, base_size, min_mkt, held
+                        )
+                        return
 
             if base_size <= 0 or limit_price <= 0:
                 logging.error("Invalid maker params for %s %s: price=%.8f size=%.8f", side, product_id, limit_price, base_size)
@@ -1544,6 +1629,17 @@ class TradeBot:
             self._macd[product_id].update(close_price)
             self._rsi[product_id].update(close_price)
         self.ticks[product_id] += 1  # now counts candles
+        # Count candles closed since last telemetry heartbeat
+        try:
+            self._candles_closed += 1
+        except Exception:
+            # very defensive; should not happen
+            self._candles_closed = 1
+        # Mark last closed-candle time for stall watchdog
+        try:
+            self._last_candle_close_ts[product_id] = time.time()
+        except Exception:
+            pass
 
         # ---- Quartermaster pre-check (take-profit / time-in-trade) ----
         try:

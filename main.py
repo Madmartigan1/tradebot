@@ -1,4 +1,4 @@
-# main.py (v1.0.9 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
+# main.py (v1.1.1 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
@@ -14,7 +14,7 @@ from bot.tradebot import TradeBot
 
 # Optional elapsed-time AutoTune refresh (one-shot after N hours)
 AUTOTUNE_ELAPSED_REFRESH_ENABLED = True
-AUTOTUNE_ELAPSED_REFRESH_HOURS = 4
+AUTOTUNE_ELAPSED_REFRESH_HOURS = 3
 
 _shutdown_once = threading.Event()
 _run_start_monotonic = time.monotonic()

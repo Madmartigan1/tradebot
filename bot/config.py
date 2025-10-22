@@ -1,4 +1,4 @@
-# ----v1.1.0----
+# ----v1.1.1----
 # bot/config.py
 import logging
 from dataclasses import dataclass, field
@@ -42,7 +42,7 @@ class BotConfig:
         "ETH-USD","XRP-USD","ADA-USD","TRAC-USD","ALGO-USD","XLM-USD","HBAR-USD", "FIL-USD",
         "NEAR-USD","SOL-USD","DOGE-USD","AVAX-USD","LINK-USD","SUI-USD","LTC-USD","CRO-USD",
         "DOT-USD","ARB-USD", "IP-USD", "WLFI-USD", "FLOKI-USD", "PEPE-USD", "BONK-USD", 
-        "SEI-USD", "SHIB-USD", "TAO-USD",
+        "SEI-USD", "SHIB-USD", "POL-USD",
     ])
     
     # Dry run used for paper trading. Set to False for live trading
@@ -100,7 +100,7 @@ class BotConfig:
     
     # Quartermaster exits
     enable_quartermaster: bool = True
-    take_profit_bps: int = 800          # 8%
+    take_profit_bps: int = 1000         # 10%
     max_hold_hours: int = 36            # ⟵ was 24; now 36
     stagnation_close_bps: int = 200     # 2%
     flat_macd_abs_max: float = 0.40
@@ -144,7 +144,7 @@ class BotConfig:
         "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":26.0, "NEAR-USD":20.0, "TRAC-USD":24.0,
 
         # Tier C / thinner or slower — mostly unchanged (small trims only where safe)
-        "ALGO-USD":22.0, "XLM-USD":20.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0, "TAO-USD":22.0,
+        "ALGO-USD":22.0, "XLM-USD":20.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0, "POL-USD":22.0,
 
         # Other altcoins(EXPERIMENTAL)
         "IP-USD":22.0, "WLFI-USD":22.0, "FLOKI-USD":24.0, "PEPE-USD":26.0, "BONK-USD":28.0, 
@@ -205,9 +205,21 @@ class BotConfig:
     qm_dust_suppress_minutes: int = 30
     qm_sell_buffer_mult: float = 1.0
 
-    # --- Maker reprice (optional) ---
-    maker_reprice_enabled: bool = False
-    maker_reprice_max: int = 1
-    maker_reprice_on_close_only: bool = True 
+    # --- WS liveness/keepalive ---
+    ws_idle_warn_s: int = 45              # warn if no WS msg in 45s
+    ws_idle_reconnect_s: int = 180        # force reconnect if idle >180s
+    ws_resubscribe_interval_s: int = 900  # reissue subscriptions every 15 min
+    ws_ping_interval_s: int = 30          # best-effort ping cadence (if SDK supports it)
+    ws_idle_flip_to_local_after: int = 0  # 0=disabled; else after N reconnects, switch to local candles
+    
+    stall_candle_factor = 3            # stalled if no close for 3 × granularity_sec
+    stall_hard_reconnect_after = 3     # after 3 stall detections in a row, hard reconnect
+    stall_flip_to_local_after = 3      # after 3 total stalls this session, switch to local candles
+    # (Optional) also consider lowering:
+    ws_resubscribe_interval_s = 900    # periodic resubscribe cadence 900s = every 15 minutes
+    
+    # Telemetry
+    telemetry_heartbeat_s: int = 1800   # 30 min; set 0 to disable
+
 
 CONFIG = BotConfig()

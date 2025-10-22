@@ -1,4 +1,4 @@
-# Tradebot v1.1.0
+# Tradebot v1.1.1
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -9,9 +9,9 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-⚙️ **Maintenance and resilience upgrades — a cleaner deck, steadier sails, and sharper command discipline**
+⚙️ **Maintenance and connectivity upgrades**
 
-Tradebot v1.1.0 > introduces smarter exits, cleaner accounting, and sharper situational awareness — keeping your automated fleet steady across any tide.
+Tradebot v1.1.1 > introduces better connectivity, smarter exits, cleaner accounting, and sharper situational awareness.
 
 ---
 
@@ -42,8 +42,14 @@ To make the strategy easier to visualize:
 - **Swab → Deck Maintenance & Logkeeper** The newest crew member in v1.0.8 — responsible for keeping the decks spotless and logs consistent. Handles processed fill pruning and record hygiene to prevent bloat.
 (*Fun fact:* The term “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.)
 
+- **Watchdog → Connection Officer**  
+  The newest recruit in v1.1.1 — a loyal sentry who keeps the fleet online and alert.  
+  - **Duties:** Monitors the WebSocket line for silence, issues pings, reconnects when idle, and even switches to local candle tracking if the exchange link grows unstable.    
+  The Watchdog ensures the Captain (EMA) never sails blind, keeping communication alive through calm and storm alike.
+
+
 Together they form a chain of command:
-**EMA (Captain)** gives orders -> **AutoTune (Navigator)** continuously adjusts the fleet’s heading based on market weather -> **MACD (Commodore)** ensures strategy aligns with the broader trend -> **RSI (Skipper)** vetoes reckless moves -> **Quartermaster** secures profits and clears stagnation -> **Deckhand** keeps the decks clear of idle trades, ensuring the fleet stays agile and battle-ready -> **Swab** ensures no duplicate fills, stale positions, or misaligned logs remain aboard.
+**EMA (Captain)** gives orders -> **AutoTune (Navigator)** continuously adjusts the fleet’s heading based on market weather -> **MACD (Commodore)** ensures strategy aligns with the broader trend -> **RSI (Skipper)** vetoes reckless moves -> **Quartermaster** secures profits and clears stagnation -> **Deckhand** keeps the decks clear of idle trades, ensuring the fleet stays agile and battle-ready -> **Swab** ensures no duplicate fills, stale positions, or misaligned logs remain aboard -> **Watchdog** keeps watch over the horizon, ensuring communication lines stay open and the ship never drifts alone. 
 
 ---
 
@@ -58,7 +64,7 @@ Together they form a chain of command:
 
 ---
 
-## ✨ v1.1.0 Highlights
+## ✨ v1.1.1 Highlights
 
 - **Stronger order-validation core**  
   All order submissions now route through a new `_resp_ok()` validator that confirms true success from Coinbase responses before logging any spend or trade event.

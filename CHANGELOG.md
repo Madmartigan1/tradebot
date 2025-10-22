@@ -3,6 +3,26 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+
+## [1.1.1] – 2025-10-22
+### Added
+- **Watchdog subsystem** — monitors websocket health, sends periodic pings, re-subscribes automatically, and triggers reconnects if idle too long.  
+  - Warns on inactivity (`ws_idle_warn_s`)  
+  - Reconnects after timeout (`ws_idle_reconnect_s`)  
+  - Optionally flips to local candle aggregation after repeated failures (`ws_idle_flip_to_local_after`)  
+  - Performs periodic re-subscriptions (`ws_resubscribe_interval_s`)  
+  - Integrated seamlessly with the existing `run_ws_forever()` loop.
+
+### Removed
+- **Dead code cleanup**: the unused `_maybe_reprice_resting()` method and related config keys were removed for clarity.
+
+### Changed
+- Minor logging improvements: startup now announces candle mode, interval, and warmup status for better visibility.
+- Safer SELL clamp logic (reinforced from v1.1.0) retained and verified.
+
+**Result:** Tradebot now self-heals when Coinbase WebSocket stalls, keeping the EMA captain and Quartermaster trading smoothly without manual restarts.
+
+
 ## [1.1.0] - 2025-10-17
 ### Added
 - **API response normalization** via `_resp_ok()`:  
@@ -36,7 +56,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
 
-## [1.0.9] - 2025-10-14
+## [1.0.9] - 2025-10-12
 ### Added
 - **Graceful shutdown on all platforms** with unified `_request_shutdown()` for `Ctrl+C`/`SIGTERM` and thread exceptions; optional `SIGBREAK` on Windows.
 - **Uncaught-exception hooks** (`sys.excepthook`, `threading.excepthook`) that log, request shutdown, and exit cleanly.
@@ -73,7 +93,7 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - **New crewmember — 🧹 The Swab:**  
   Keeps the decks spotless and the logs consistent. The Swab ensures no duplicate fills, stale positions, or misaligned records remain aboard.  
   *Fun fact:* the name “Swab” was inspired by *Captain Ron* — because every good ship needs a swab.
-- Adaptive alpha curve for smoother yet more decisive BLEND transitions.
+  - Adaptive alpha curve for smoother yet more decisive BLEND transitions.
 - Introduced per-knob learning rates, quantized steps (0.5 bps), and min visible delta (0.25 bps).
 - Implemented per-vote safety cap (2 bps) to prevent over-correction.
 - BLEND now moves current knobs toward the winning regime preset instead of averaging two presets.
