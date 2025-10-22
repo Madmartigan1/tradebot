@@ -1,4 +1,4 @@
-# Tradebot v1.1.0
+# Tradebot v1.1.1
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -11,7 +11,7 @@
 
 ⚙️ **Maintenance and connectivity upgrades**
 
-Tradebot v1.1.1 > introduces better connectivity functionality, smarter exits, cleaner accounting, and sharper situational awareness.
+Tradebot v1.1.1 > introduces better connectivity, smarter exits, cleaner accounting, and sharper situational awareness.
 
 ---
 
