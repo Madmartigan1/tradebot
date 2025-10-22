@@ -64,7 +64,7 @@ Together they form a chain of command:
 
 ---
 
-## ✨ v1.1.0 Highlights
+## ✨ v1.1.1 Highlights
 
 - **Stronger order-validation core**  
   All order submissions now route through a new `_resp_ok()` validator that confirms true success from Coinbase responses before logging any spend or trade event.
