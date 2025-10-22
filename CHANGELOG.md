@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
-## [1.1.1] – 2025-10-21
+## [1.1.1] – 2025-10-22
 ### Added
 - **Watchdog subsystem** — monitors websocket health, sends periodic pings, re-subscribes automatically, and triggers reconnects if idle too long.  
   - Warns on inactivity (`ws_idle_warn_s`)  
