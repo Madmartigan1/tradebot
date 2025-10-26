@@ -321,7 +321,7 @@ def main():
                 if _shutdown_once.is_set():
                     break
 
-                lookback_inner = int(getattr(CONFIG, "lookback_hours", 48))
+                lookback_inner = 2  # Only lookback 2 hours every hour
 
                 def _threaded_reconcile():
                     try:
