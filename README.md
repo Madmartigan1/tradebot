@@ -11,7 +11,7 @@
 
 ⚙️ **Maintenance and connectivity upgrades**
 
-Tradebot v1.1.2 > Improved autotune BLEND functionality and added CLI overrides.
+Tradebot v1.1.2 -> Improved autotune BLEND functionality and added CLI overrides.
 
 ---
 
