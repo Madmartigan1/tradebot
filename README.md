@@ -1,6 +1,6 @@
 # Tradebot v1.1.2
 
-[![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
+[![Latest version](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver&include_prereleases)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue)](requirements.txt)
 ![Code size](https://img.shields.io/github/languages/code-size/Madmartigan1/tradebot)
@@ -9,7 +9,9 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-⚙️ **Improved autotune BLEND functionality. Added CLI overrides. Fixed thread for hourly reconciliation.**
+---
+
+⚙️ **Improved autotune BLEND functionality. Added CLI overrides. Fixed mid-session reconciliation thread.**
 
 ---
 
@@ -96,6 +98,8 @@ Together they form a chain of command:
 ---
 
 ### Upgrade notes
+- Improved BLEND functionality with autotune.
+- Added CLI overrides.
 - Backward-compatible with v1.0.9 state files.  
 - No CSV header changes.  
 - Daily-spend logic tightened to count only successfully accepted orders.
