@@ -49,7 +49,7 @@ class BotConfig:
     dry_run: bool = False
     # Max amount per trade and total trade amount per run
     usd_per_order: float = 30
-    daily_spend_cap_usd: float = 270.0  # buys stop after cap; sells continue
+    daily_spend_cap_usd: float = 300.0  # buys stop after cap; sells continue
     
     # -------- Candles v1.1.0 --------
     mode: str = "ws"                # "ws" server side candle builds or "local" if you want local aggregation, ws is fine by default.
@@ -104,8 +104,8 @@ class BotConfig:
     
     # --- v1.0.3: Reconciliation during the session ---
     mid_reconcile_enabled: bool = True
-    mid_reconcile_interval_minutes: int = 60  # hourly sweep
-    reconcile_on_sell_attempt: bool = True    # quick sweep right before SELL
+    mid_reconcile_interval_minutes: int = 60   # hourly sweep
+    reconcile_on_sell_attempt: bool = False    # disabled since it was causing connectivity issues
 
     # EMA (global)
     short_ema: int = 40                # good for 5m candles
@@ -202,11 +202,11 @@ class BotConfig:
     qm_sell_buffer_mult: float = 1.0
 
     # --- WS liveness/keepalive ---
-    ws_idle_warn_s: int = 45              # warn if no WS msg in 45s
-    ws_idle_reconnect_s: int = 180        # force reconnect if idle >180s
+    ws_idle_warn_s: int = 30              # warn if no WS msg in 45s
+    ws_idle_reconnect_s: int = 90         # force reconnect if idle >180s
     ws_resubscribe_interval_s: int = 900  # reissue subscriptions every 15 min
-    ws_ping_interval_s: int = 30          # best-effort ping cadence (if SDK supports it)
-    ws_idle_flip_to_local_after: int = 0  # 0=disabled; else after N reconnects, switch to local candles
+    ws_ping_interval_s: int = 20          # best-effort ping cadence (if SDK supports it)
+    ws_idle_flip_to_local_after: int = 3  # 0=disabled; else after N reconnects, switch to local candles
     
     stall_candle_factor = 3            # stalled if no close for 3 × granularity_sec
     stall_hard_reconnect_after = 3     # after 3 stall detections in a row, hard reconnect
