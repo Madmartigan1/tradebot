@@ -321,15 +321,23 @@ def main():
                 if _shutdown_once.is_set():
                     break
 
-                try:
-                    lookback_inner = int(getattr(CONFIG, "lookback_hours", 48))
-                    log.info("Mid-session reconcile sweep...")
-                    if hasattr(bot, "reconcile_now"):
-                        bot.reconcile_now(hours=lookback_inner)
-                    else:
-                        bot.reconcile_recent_fills(lookback_inner)
-                except Exception as e:
-                    logging.getLogger("main").warning("Mid-session reconcile failed: %s", e)
+                lookback_inner = int(getattr(CONFIG, "lookback_hours", 48))
+
+                def _threaded_reconcile():
+                    try:
+                        log.info("Mid-session reconcile sweep...")
+                        if hasattr(bot, "reconcile_now"):
+                            bot.reconcile_now(hours=lookback_inner)
+                        else:
+                            bot.reconcile_recent_fills(lookback_inner)
+                    except Exception as e:
+                        logging.getLogger("main").warning("Mid-session reconcile failed: %s", e)
+
+                threading.Thread(
+                    target=_threaded_reconcile,
+                    name=f"reconcile-{int(time.time())}",
+                    daemon=True
+                ).start()
 
         threading.Thread(target=_periodic_reconcile, daemon=True, name="mid_reconcile").start()
 

@@ -1,4 +1,4 @@
-# bot/tradebot.py — v1.1.1
+# bot/tradebot.py — v1.1.2
 # Adds:
 #  - Quartermaster exits (x% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
