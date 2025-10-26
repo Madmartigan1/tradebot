@@ -1,10 +1,12 @@
-# main.py (v1.1.1 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
+# main.py (v1.1.2 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
 import threading
 import logging
 import signal
+import argparse
+
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -19,6 +21,30 @@ AUTOTUNE_ELAPSED_REFRESH_HOURS = 3
 _shutdown_once = threading.Event()
 _run_start_monotonic = time.monotonic()
 
+def _str2bool(v: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    if s in ("1","true","t","yes","y","on"):
+        return True
+    if s in ("0","false","f","no","n","off"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected boolean, got {v!r}")
+
+def parse_cli_overrides(argv=None):
+    p = argparse.ArgumentParser(add_help=True, description="TradeBot")
+    # booleans
+    p.add_argument("--dry-run", dest="dry_run", type=_str2bool, nargs="?", const=True,
+                   help="Paper trade without sending live orders.")
+    p.add_argument("--enable-quartermaster", dest="enable_quartermaster", type=_str2bool, nargs="?", const=True,
+                   help="Enable/disable Quartermaster depletion logic.")
+    # money
+    p.add_argument("--usd-per-order", dest="usd_per_order", type=float,
+                   help="Max USD per buy order.")
+    p.add_argument("--max-spend-cap", dest="daily_spend_cap_usd", type=float,
+                   help="Daily USD spend cap for buys (sells continue).")
+    # add more here later if you like, e.g. --products, --granularity, etc.
+    return p.parse_known_args(argv)[0]
 
 def _finalize_and_exit(code: int = 0):
     try:
@@ -156,6 +182,17 @@ def _request_shutdown(bot: TradeBot | None, code: int = 0):
 
 def main():
     log = _setup_logging()
+    
+    # Apply CLI overrides before touching CONFIG anywhere else
+    args = parse_cli_overrides(sys.argv[1:])
+    overrides = {}
+    for k, v in vars(args).items():
+        if v is not None:
+            setattr(CONFIG, k, v)
+            overrides[k] = v
+    if overrides:
+        log.info("CLI overrides applied: %s", {k: overrides[k] for k in sorted(overrides)})
+    
     # Validate + coerce the global CONFIG in place
     validate_config(CONFIG)
     
