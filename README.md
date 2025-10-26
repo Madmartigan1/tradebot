@@ -9,6 +9,8 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
+---
+
 ⚙️ **Improved autotune BLEND functionality. Added CLI overrides.**
 
 ---
@@ -96,6 +98,8 @@ Together they form a chain of command:
 ---
 
 ### Upgrade notes
+- Improved BLEND functionality with autotune.
+- Added CLI overrides.
 - Backward-compatible with v1.0.9 state files.  
 - No CSV header changes.  
 - Daily-spend logic tightened to count only successfully accepted orders.
