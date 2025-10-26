@@ -9,7 +9,7 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-⚙️ **Improved autotune BLEND functionality. Added CLI overrides. Added new thread for hourly orders filled reconciliation.**
+⚙️ **Improved autotune BLEND functionality. Added CLI overrides. Fixed thread for hourly reconciliation.**
 
 ---
 
