@@ -1,4 +1,4 @@
-# Tradebot v1.1.1
+# Tradebot v1.1.2
 
 [![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -9,9 +9,7 @@
 [![Open PRs](https://img.shields.io/github/issues-pr/Madmartigan1/tradebot)](https://github.com/Madmartigan1/tradebot/pulls)
 [![Stars](https://img.shields.io/github/stars/Madmartigan1/tradebot?style=social)](https://github.com/Madmartigan1/tradebot/stargazers)
 
-⚙️ **Maintenance and connectivity upgrades**
-
-Tradebot v1.1.1 > introduces better connectivity, smarter exits, cleaner accounting, and sharper situational awareness.
+⚙️ **Improved autotune BLEND functionality. Added CLI overrides.**
 
 ---
 
@@ -64,11 +62,14 @@ Together they form a chain of command:
 
 ---
 
-## ✨ v1.1.1 Highlights
-
-- **Stronger order-validation core**  
-  All order submissions now route through a new `_resp_ok()` validator that confirms true success from Coinbase responses before logging any spend or trade event.
-
+## ✨ v1.1.2 Highlights
+- **Command-line overrides**: you can now change core settings at runtime without editing files.
+  Examples:
+  ```bash
+  python main.py --dry-run=true
+  python main.py --enable-quartermaster=false
+  python main.py --usd-per-order=30 --max-spend-cap=300
+  ```
 - **Quartermaster 2.0**  
   The Take-Profit & Stagnation Officer now includes:
   - Live-balance verification before exits  

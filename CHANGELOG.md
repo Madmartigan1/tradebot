@@ -4,7 +4,26 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
-## [1.1.1] – 2025-10-22
+## [1.1.2] – 2025-10-26
+### Added
+- **CLI overrides in `main.py`**: run-time flags now override `config.py` without editing files:
+  - `--dry-run` (`True/False`)
+  - `--enable-quartermaster` (`True/False`)
+  - `--usd-per-order <float>`
+  - `--max-spend-cap <float>` (maps to `daily_spend_cap_usd`)
+  - Logs a one-line summary: `CLI overrides applied: {...}`
+
+### Changed
+- **AutoTune BLEND corridor**: removed the 0.69–0.70 dead-zone. Any winner with `share ≥ 0.55 and < 0.70` enters **BLEND**.
+- **Near-SNAP midpoint behavior**: when `0.65 ≤ share < 0.70`, the target is the midpoint between **winner** and **choppy** presets, then blended via the existing alpha curve. This keeps nudges gentle and symmetric for both uptrend and downtrend winners.
+- **Startup logs** now show CLI overrides (if any) before advisor/quartermaster/candle lines for clarity.
+
+### Docs
+- **USAGE.md** updated with example CLI flags.
+- **README** header bumped to **v1.1.2**.
+
+
+## [1.1.1] – 2025-10-21
 ### Added
 - **Watchdog subsystem** — monitors websocket health, sends periodic pings, re-subscribes automatically, and triggers reconnects if idle too long.  
   - Warns on inactivity (`ws_idle_warn_s`)  

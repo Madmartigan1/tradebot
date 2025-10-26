@@ -30,5 +30,21 @@ cp APIkeys.env.example APIkeys.env
 ## 2) Run the bot
 ```bash
 python main.py
+```
+
+### CLI flags (optional overrides)
+You can override selected `config.py` values from the command line for a single run:
+
+```bash
+# Paper trade without live orders
+python main.py --dry-run=true
+
+# Disable Quartermaster exits
+python main.py --enable-quartermaster=false
+
+# Adjust per-order size and daily cap
+python main.py --usd-per-order=30 --max-spend-cap=300
+```
+
 
 <!-- latest version -->

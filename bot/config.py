@@ -49,13 +49,13 @@ class BotConfig:
     dry_run: bool = False
     # Max amount per trade and total trade amount per run
     usd_per_order: float = 30
-    daily_spend_cap_usd: float = 240.0  # buys stop after cap; sells continue
+    daily_spend_cap_usd: float = 270.0  # buys stop after cap; sells continue
     
     # -------- Candles v1.1.0 --------
     mode: str = "ws"                # "ws" server side candle builds or "local" if you want local aggregation, ws is fine by default.
     candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
     min_candles: int = 120             # wait for indicator warm-up
-    confirm_candles: int = 3           # consecutive cross confirms
+    confirm_candles: int = 3           # consecutive cross confirms (3 for daytime, 2 for night)
     use_backfill: bool = True
     warmup_candles: int = 200
 
@@ -80,14 +80,13 @@ class BotConfig:
     #                             ceil(autotune_vote_min_candles * 15min))
     # We changed the detector’s minimum to require ≥120 candles (EMA long = 120),
     # so 36h ≈ 144×15m satisfies the requirement and yields non-choppy classifications.
-    # If you skip 2–3 days and want (not really necessary for a fresh start) the vote to span ~48–72h, temporarily bump this to 48–72.
-    # (You can leave autotune_vote_min_candles at 144 to “lock” a 36h window, or raise it to force a larger window.)
     autotune_lookback_hours: int = 36         
     # =====================================================================================
     
     # --- Regime voting (decoupled from trading candles) ---
     # Use a dedicated timeframe for market regime voting (does NOT change trading candles)
     autotune_vote_interval: str = "15m"
+    
     # Minimum number of vote candles required; at 15m, 144 candles ≈ 36 hours.
     # Effective voting window:
     #   hours_used_for_vote = max(autotune_lookback_hours,
@@ -95,12 +94,9 @@ class BotConfig:
     autotune_vote_min_candles: int = 144
     # ------------------------------------------------------
     
-    # Currently a NO-OP as it was planned but eliminated due to flapping risks.
-    #elapsed_autotune_lookback_hours: int = 6
-    
     # Quartermaster exits
-    enable_quartermaster: bool = True
-    take_profit_bps: int = 1000         # 10%
+    enable_quartermaster: bool = False  # Set to True every now and then to maximize profits
+    take_profit_bps: int = 1200         # 12%
     max_hold_hours: int = 36            # ⟵ was 24; now 36
     stagnation_close_bps: int = 200     # 2%
     flat_macd_abs_max: float = 0.40
@@ -141,14 +137,14 @@ class BotConfig:
         "ETH-USD":16.0, "SOL-USD":18.0, "LINK-USD":18.0, "XRP-USD":20.0, "DOGE-USD":20.0, "LTC-USD":18.0,
 
         # Tier B — light trim where fills lagged; others unchanged
-        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":26.0, "NEAR-USD":20.0, "TRAC-USD":24.0,
+        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":22.0, "NEAR-USD":20.0, "TRAC-USD":22.0,
 
         # Tier C / thinner or slower — mostly unchanged (small trims only where safe)
-        "ALGO-USD":22.0, "XLM-USD":20.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0, "POL-USD":22.0,
+        "ALGO-USD":20.0, "XLM-USD":18.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0, "POL-USD":22.0,
 
         # Other altcoins(EXPERIMENTAL)
-        "IP-USD":22.0, "WLFI-USD":22.0, "FLOKI-USD":24.0, "PEPE-USD":26.0, "BONK-USD":28.0, 
-        "SEI-USD":28.0, "SHIB-USD":20.0,
+        "IP-USD":22.0, "WLFI-USD":22.0, "FLOKI-USD":24.0, "PEPE-USD":24.0, "BONK-USD":22.0, 
+        "SEI-USD":24.0, "SHIB-USD":20.0,
     })
 
 
@@ -220,6 +216,5 @@ class BotConfig:
     
     # Telemetry
     telemetry_heartbeat_s: int = 1800   # 30 min; set 0 to disable
-
 
 CONFIG = BotConfig()
