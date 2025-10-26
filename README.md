@@ -1,6 +1,6 @@
 # Tradebot v1.1.2
 
-[![Latest release](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver)](https://github.com/Madmartigan1/tradebot/releases)
+[![Latest version](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver&include_prereleases)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13%2B-blue)](requirements.txt)
 ![Code size](https://img.shields.io/github/languages/code-size/Madmartigan1/tradebot)
