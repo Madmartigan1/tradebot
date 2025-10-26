@@ -1,4 +1,4 @@
-# bot/autotune.py (v1.1.1) — telemetry + stronger BLEND tuning + caller-controlled lookback
+# bot/autotune.py (v1.1.2) — telemetry + better BLEND tuning + caller-controlled lookback
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -405,12 +405,15 @@ def autotune_config(
     # Decide mode and blending strength
     if share >= 0.70:
         mode = "SNAP"; portfolio_regime = winner; alpha = 1.0
-    elif 0.55 <= share <= 0.69:
+    elif share >= 0.55:
         mode = "BLEND"; portfolio_regime = winner
         # old linear map replaced by a more decisive curve
         alpha = _alpha_from_share(share)
     else:
         mode = "CHOPPY"; portfolio_regime = "choppy"; alpha = 0.0
+        
+    # Near-SNAP blends: use midpoint target between winner and choppy (gentler, reduces oscillation)
+    blend_midpoint = (mode == "BLEND" and 0.65 <= share < 0.70)
 
     # Build target knob values
     changes: Dict[str, Tuple[Optional[float], Optional[float]]] = {}
@@ -436,6 +439,12 @@ def autotune_config(
 
         for name in (set(win_t.keys()) | set(cho_t.keys())):
             tgt = win_t.get(name, cho_t.get(name))
+            tgt = win_t.get(name, cho_t.get(name))
+            if blend_midpoint:
+                wv = win_t.get(name)
+                cv = cho_t.get(name)
+                if isinstance(wv, (int, float)) and isinstance(cv, (int, float)):
+                    tgt = 0.5 * (float(wv) + float(cv))
             cur = getattr(cfg, name, tgt)
 
             if name in BLEND_KNOBS and isinstance(tgt, (int, float)) and isinstance(cur, (int, float)):
