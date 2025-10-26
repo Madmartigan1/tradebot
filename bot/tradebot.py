@@ -1725,11 +1725,16 @@ class TradeBot:
             return
         self._reconciling = True
         try:
-            h = int(hours or getattr(self.cfg, "lookback_hours", 48))
-            # Allow fills lookback up to 7 days. Increase for wider range.
+            if hours is not None:
+                h = int(hours)
+            else:
+                # Use long lookback ONLY for startup or manual reconcile
+                h = int(getattr(self.cfg, "lookback_hours", 48))
+            # Clamp to 6–168h for safety
             h = max(6, min(h, 168))
             self.reconcile_recent_fills(h)
         except Exception as e:
             logging.exception("reconcile_now failed: %s", e)
         finally:
             self._reconciling = False
+
