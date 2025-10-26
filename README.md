@@ -11,7 +11,7 @@
 
 ---
 
-⚙️ **Improved autotune BLEND functionality. Added CLI overrides.**
+⚙️ **Improved autotune BLEND functionality. Added CLI overrides. Fixed mid-session reconciliation thread.**
 
 ---
 
