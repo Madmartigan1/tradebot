@@ -71,6 +71,7 @@ Together they form a chain of command:
   python main.py --dry-run=true
   python main.py --enable-quartermaster=false
   python main.py --usd-per-order=30 --max-spend-cap=300
+  python main.py --help
   ```
 - **Quartermaster 2.0**  
   The Take-Profit & Stagnation Officer now includes:
