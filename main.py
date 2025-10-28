@@ -1,4 +1,4 @@
-# main.py (v1.1.2 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
+# main.py (v1.1.3 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
@@ -43,7 +43,9 @@ def parse_cli_overrides(argv=None):
                    help="Max USD per buy order.")
     p.add_argument("--max-spend-cap", dest="daily_spend_cap_usd", type=float,
                    help="Daily USD spend cap for buys (sells continue).")
-    # add more here later if you like, e.g. --products, --granularity, etc.
+    # add more here later if needed, e.g. --products, --granularity, etc.
+    p.add_argument("--mid-session-reconcile", dest="mid_reconcile_enabled", type=_str2bool, nargs="?", const=True,
+                   help="Enable/disable the mid-session reconcile scheduler (true/false).")
     return p.parse_known_args(argv)[0]
 
 def _finalize_and_exit(code: int = 0):
@@ -321,7 +323,7 @@ def main():
                 if _shutdown_once.is_set():
                     break
 
-                lookback_inner = 2  # Only lookback 2 hours every hour
+                lookback_inner = 2  # Only lookback 2 hours every hour for mid-session reconcile
 
                 def _threaded_reconcile():
                     try:
