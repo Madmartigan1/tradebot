@@ -69,8 +69,9 @@ Together they form a chain of command:
   Examples:
   ```bash
   python main.py --dry-run=true
-  python main.py --enable-quartermaster=false
-  python main.py --usd-per-order=30 --max-spend-cap=300
+  python main.py --enable-quartermaster=false --mid-session-reconcile
+  python main.py --usd-per-order=10 --max-spend-cap=200
+  python main.py --dry-run off --products=SOL-USD,PEPE-USD,AVAX-USD
   python main.py --help
   ```
 - **Quartermaster 2.0**  
