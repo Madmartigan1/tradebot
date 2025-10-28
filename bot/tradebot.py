@@ -1,4 +1,4 @@
-# bot/tradebot.py — v1.1.2
+# bot/tradebot.py — v1.1.3
 # Adds:
 #  - Quartermaster exits (x% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
@@ -126,6 +126,8 @@ from .strategy import AdvisorSettings, advisor_allows
 class TradeBot:
     def __init__(self, cfg, api_key: str, api_secret: str, portfolio_id: Optional[str] = None):
         self.cfg = cfg
+        # live-balance cache (per base asset)
+        self._acct_cache: Dict[str, dict] = {}  # base -> {"ts": epoch, "avail": float}
         # Local-candle settle queue: (release_ts, product_id, start_sec, close_price)
         self._local_settle_q = deque()
         # default settle delay (ms); override via CONFIG.local_close_settle_ms if present
@@ -167,6 +169,17 @@ class TradeBot:
         # Initialize WS client/handler
         self._init_ws()
         
+    def _set_local_mode_grace(self, buckets: float = 1.2):
+        """
+        Give each product a grace window after switching to LOCAL aggregation so the
+        stall watchdog does not thrash while the first local candle is forming.
+        'buckets' is a multiplier of granularity_sec.
+        """
+        horizon = time.time() + max(1.0, float(self.granularity_sec) * float(buckets))
+        for pid in self.product_ids:
+            self._stall_grace_until[pid] = horizon
+        logging.info("Stall watchdog grace set for all products until %.0f (%.0fs).", horizon, horizon - time.time())
+        
     def _flush_local_settle(self, now_ts: float | None = None):
         """Emit any settled local candles whose release time has arrived."""
         if self.candle_mode != "local":
@@ -193,7 +206,11 @@ class TradeBot:
             except Exception:
                 logging.debug("Non-JSON WS message: %s", raw)
                 return
-            self.on_ws_message(msg)
+            try:
+                self.on_ws_message(msg)
+            except Exception as e:
+                # Never let a logging typo or handler bug kill the WS reader
+                logging.exception("WS handler error: %s (frame=%s)", e, str(msg)[:500])
         self.ws = WSClient(api_key=self.api_key, api_secret=self.api_secret, on_message=on_msg)
 
         
@@ -273,6 +290,8 @@ class TradeBot:
         # Visibility: make candle mode explicit in logs
         logging.info("Candle mode: %s (interval=%ds)", self.candle_mode.upper(), self.granularity_sec)
         
+        self._live_bal_ttl = int(getattr(self.cfg, "live_balance_ttl_s", 20))
+        
         # EMA objects and per-product minimum candles
         for p in self.product_ids:
             se, le, mt = self._get_ema_params(p)
@@ -283,12 +302,19 @@ class TradeBot:
         # --- Candle-stall watchdog state ---
         # Last observed *closed* candle time per product (epoch seconds).
         self._last_candle_close_ts: Dict[str, float] = {p: 0.0 for p in self.product_ids}
+        
         # Consider stalled if no close for N * granularity_sec (configurable).
         self._stall_candle_factor = int(getattr(self.cfg, "stall_candle_factor", 3))
+        
         # Escalation counters across the session.
         self._stall_hits = 0          # consecutive stalls (resubscribe → reconnect)
         self._stall_total = 0         # lifetime stalls (optional flip-to-local threshold)
-
+        
+        # Skip stall checks for products under timed grace (e.g., after flipping to LOCAL)
+        self._stall_grace_until: Dict[str, float] = {p: 0.0 for p in self.product_ids}
+        self._consecutive_stall_windows = 0
+        self._last_stall_action_ts = 0.0
+        
         # Spend/cooldown
         self.spend = SpendTracker()
         self.last = LastTradeTracker()
@@ -297,6 +323,7 @@ class TradeBot:
             float(getattr(self.cfg, "daily_spend_cap_usd", 0.0)),
             self.spend.today_total(),
         )
+        
         # Portfolio from fills
         self.positions: Dict[str, float] = defaultdict(float)
         self.cost_basis: Dict[str, float] = defaultdict(float)
@@ -316,6 +343,7 @@ class TradeBot:
         self._idle_reconnects = 0
         # Telemetry/heartbeat
         self._last_heartbeat_ts = 0.0
+        self._last_rest_backstop_poll_ts = 0.0  # throttle REST backstop polling
         # Counts candles closed since last heartbeat (rolled up in HB log)
         self._candles_closed = 0
         # Reconnect backoff bounds (seconds)
@@ -380,13 +408,21 @@ class TradeBot:
         # Otherwise, be conservative
         return False
     
-                
+    # NOTE: now uses a short TTL cache and graceful fallback on 5xx server errors       
     def _get_live_available_base(self, product_id: str) -> float:
         """
         Prefer Advanced Trade 'trading-available' over generic funding 'available';
         subtract any hold; paginate; pass portfolio_id; optional fallback to local position.
         """
         base = product_id.split("-")[0]
+        now = time.time()
+        # 1) Serve from cache if fresh
+        try:
+            c = self._acct_cache.get(base)
+            if c and (now - float(c.get("ts", 0.0))) <= max(5, self._live_bal_ttl):
+                return float(c.get("avail", 0.0))
+        except Exception:
+            pass
         try:
             params = {}
             if getattr(self, 'portfolio_id', None):
@@ -416,6 +452,13 @@ class TradeBot:
                     except Exception:
                         hold_f = 0.0
                     return max(0.0, val_f - hold_f)
+                    avail_f = max(0.0, val_f - hold_f)
+                    # update cache
+                    try:
+                        self._acct_cache[base] = {"ts": now, "avail": float(avail_f)}
+                    except Exception:
+                        pass
+                    return avail_f
                 cursor = (
                     body.get("cursor") or body.get("next_cursor")
                     or (body.get("pagination") or {}).get("cursor")
@@ -424,6 +467,14 @@ class TradeBot:
                     break
         except Exception as e:
             logging.debug("get_accounts failed while reading live available for %s: %s", product_id, e)
+
+        # 2) Graceful fallback path on errors/5xx: use cached value if present
+        try:
+            c = self._acct_cache.get(base)
+            if c:
+                return float(c.get("avail", 0.0))
+        except Exception:
+            pass
 
         if bool(getattr(self.cfg, "allow_position_fallback_for_avail", False)):
             return max(0.0, float(self.positions.get(product_id, 0.0)))
@@ -550,9 +601,86 @@ class TradeBot:
                     last = arr[-1]
                     self._last_candle_start[pid] = int(last.get("start"))
                     self._cur_candle_close[pid] = float(last.get("close"))
+                    self._last_candle_close_ts[pid] = time.time()
                 logging.info("Backfilled %s with %d candles (%s)", pid, len(arr), enum)
             except Exception as e:
                 logging.debug("Backfill failed for %s: %s", pid, e)
+                
+    # ----------------------------------------------------------------
+    # REST backstop: poll /candles while WS is idle to keep candles
+    # progressing in LOCAL mode (or when WS candles stall).
+    # ----------------------------------------------------------------
+    def _rest_backstop_tick(self):
+        """
+        Poll a tiny candle window via REST when WS has been idle for a while,
+        and advance _on_candle_close() so strategies keep running.
+        Throttled by rest_backstop_period_s.
+        """
+        try:
+            if not bool(getattr(self.cfg, "enable_rest_backstop", True)):
+                return
+            now = time.time()
+            idle_for = now - float(self._last_msg_ts or 0.0)
+            idle_thr = int(getattr(self.cfg, "rest_backstop_idle_s", 75))
+            if idle_for < idle_thr:
+                # Detect candle staleness even if WS is chatty (heartbeats/ticker)
+                stall_s = int(self._stall_candle_factor) * int(self.granularity_sec)
+                any_stale = False
+                try:
+                    for pid, last_ts in self._last_candle_close_ts.items():
+                        if last_ts and (now - float(last_ts)) >= stall_s:
+                            any_stale = True
+                            break
+                except Exception:
+                    any_stale = False
+                if idle_for < idle_thr and not any_stale:
+                    return  # WS is fine; don’t poll
+
+            # throttle REST polls
+            period = int(getattr(self.cfg, "rest_backstop_period_s", 20))
+            if now - float(self._last_rest_backstop_poll_ts or 0.0) < max(5, period):
+                return
+            self._last_rest_backstop_poll_ts = now
+
+            enum = _granularity_enum(self.granularity_sec)
+            warm = int(getattr(self.cfg, "rest_backstop_warmup", 2))
+            end_ts = int(now)
+            start_ts = end_ts - (warm + 3) * self.granularity_sec
+
+            for pid in self.product_ids:
+                try:
+                    resp = self.rest.get_candles(
+                        product_id=pid,
+                        start=str(start_ts),
+                        end=str(end_ts),
+                        granularity=enum,
+                    )
+                    body = getattr(resp, "to_dict", lambda: resp)() or {}
+                    arr = list(body.get("candles", []) or [])
+                    if not arr:
+                        continue
+                    arr.sort(key=lambda c: int(c.get("start", 0)))
+
+                    last_seen = int(self._last_candle_start.get(pid) or 0)
+                    # Walk forward: on any change in start, close previous with last known close.
+                    for c in arr:
+                        c_start = int(c.get("start"))
+                        c_close = float(c.get("close"))
+                        if last_seen and c_start > last_seen:
+                            prev_close = float(self._cur_candle_close.get(pid) or c_close)
+                            try:
+                                self._on_candle_close(pid, last_seen, prev_close)
+                            except Exception as _ce:
+                                logging.debug("REST backstop close err %s: %s", pid, _ce)
+                        self._last_candle_start[pid] = c_start
+                        self._cur_candle_close[pid] = c_close
+                        last_seen = c_start
+                    # Nudge candle-stall watchdog
+                    self._last_candle_close_ts[pid] = time.time()
+                except Exception as _e:
+                    logging.debug("REST backstop poll failed for %s: %s", pid, _e)
+        except Exception as e:
+            logging.debug("REST backstop tick error: %s", e)
 
     def _subscribe_all(self):
         """Subscribe ticker always; optionally WS candles; best-effort heartbeats."""
@@ -573,6 +701,9 @@ class TradeBot:
             except Exception:
                 logging.info("WS candles unavailable; falling back to local aggregation.")
                 self.candle_mode = "local"
+                # Give builders time to produce the first local close
+                self._set_local_mode_grace(buckets=1.2)
+                
         try:
             self.ws.heartbeats()
         except Exception:
@@ -583,6 +714,13 @@ class TradeBot:
     def open(self):
         self.ws.open()
         self._subscribe_all()
+        # Start watchdog so we recover even if the SDK loop blocks.
+        try:
+            t = threading.Thread(target=self._watchdog_loop, name="ws-watchdog", daemon=True)
+            t.start()
+            logging.info("Watchdog thread started.")
+        except Exception as e:
+            logging.debug("Failed to start watchdog thread: %s", e)
         
     def _ws_ping_best_effort(self):
         try:
@@ -637,6 +775,7 @@ class TradeBot:
                         self._reconnect_tries
                     )
                     self.candle_mode = "local"
+                    self._set_local_mode_grace(buckets=1.2)
 
     def run_ws_forever(self):
         """
@@ -680,37 +819,65 @@ class TradeBot:
                     self._subscribe_all()
                 # idle watchdog (warn/reconnect/optional flip)
                 self._maybe_warn_and_recover_idle(now)
+                
+                # REST backstop while WS is dark
+                self._rest_backstop_tick()
+                
                 # --- Candle-stall watchdog (candles not progressing even if WS is "alive") ---
                 try:
                     stall_s = int(self._stall_candle_factor) * int(self.granularity_sec)
                     stalled = []
                     for pid, last_ts in self._last_candle_close_ts.items():
+                        if now < float(self._stall_grace_until.get(pid, 0.0)):
+                            continue
                         if last_ts and (now - float(last_ts)) >= stall_s:
                             stalled.append(pid)
+                     
                     if stalled:
-                        logging.warning(
-                            "Candle stall detected for %s (>%ds without a close). Forcing resubscribe.",
-                            ", ".join(sorted(set(stalled))), stall_s
-                        )
-                        # Lightweight first step: resubscribe
-                        self._subscribe_all()
-                        # Escalate to hard reconnect after N consecutive stall hits
-                        esc_after = int(getattr(self.cfg, "stall_hard_reconnect_after", 2))
-                        self._stall_hits += 1
-                        if self._stall_hits >= max(1, esc_after):
-                            self._force_reconnect("candle stall")
-                            self._stall_hits = 0
-                            # Optional: after repeated stalls overall, flip to local candles
-                            flip_after = int(getattr(self.cfg, "stall_flip_to_local_after", 0))
-                            self._stall_total += 1
-                            if flip_after > 0 and self.candle_mode != "local" and self._stall_total >= flip_after:
-                                logging.warning("Repeated candle stalls. Switching candle mode to LOCAL aggregation.")
-                                self.candle_mode = "local"
+                        # If the majority of products are stalled, prefer local aggregation immediately.
+                        try:
+                            pct = len(stalled) / max(1, len(self.product_ids))
+                        except Exception:
+                            pct = 0.0
+                        majority_thresh = float(getattr(self.cfg, "stall_majority_flip_threshold", 0.6))
+                        if self.candle_mode == "ws" and pct >= majority_thresh:
+                            logging.warning(
+                                "Majority of products stalled (%.0f%%). Switching candle mode to LOCAL aggregation.",
+                                pct * 100.0
+                            )
+                            self.candle_mode = "local"
+                            self._set_local_mode_grace(buckets=1.2)
+
+                        # Debounce the action to avoid spamming resubscribe/reconnect.
+                        cooldown = int(getattr(self.cfg, "stall_action_cooldown_s", 30))
+                        if now - float(getattr(self, "_last_stall_action_ts", 0.0)) < max(5, cooldown):
+                            # Already acted recently; only track a new stall window.
+                            self._consecutive_stall_windows += 1
+                        else:
+                            logging.warning(
+                                "Candle stall detected for %s (>%ds without a close). Forcing resubscribe.",
+                                ", ".join(sorted(set(stalled))), stall_s
+                            )
+                            self._subscribe_all()
+                            self._last_stall_action_ts = now
+                            self._consecutive_stall_windows += 1
+
+                            # Escalate to hard reconnect after N debounced stall windows
+                            esc_after = int(getattr(self.cfg, "stall_hard_reconnect_after", 2))
+                            if self._consecutive_stall_windows >= max(1, esc_after):
+                                self._force_reconnect("candle stall")
+                                self._consecutive_stall_windows = 0
+                                self._stall_total += 1
+                                flip_after = int(getattr(self.cfg, "stall_flip_to_local_after", 0))
+                                if flip_after > 0 and self.candle_mode != "local" and self._stall_total >= flip_after:
+                                    logging.warning("Repeated candle stalls. Switching candle mode to LOCAL aggregation.")
+                                    self.candle_mode = "local"
                     else:
-                        # Healthy progress resets the consecutive stall counter
-                        self._stall_hits = 0
+                        # Healthy progress resets the consecutive stall counters
+                        self._consecutive_stall_windows = 0
                 except Exception as _stall_e:
                     logging.debug("Stall watchdog check failed: %s", _stall_e)
+                
                 # healthy loop → reset backoff
                 tries = 0
                 # ---------- Low-noise telemetry heartbeat ----------
@@ -856,6 +1023,12 @@ class TradeBot:
                     # local candle aggregation
                     if self.candle_mode == "local":
                         closed = self._builders[pid].update(p, ts_now)
+                        # If this is the first tick starting a fresh local candle, seed a per-product grace
+                        if self._builders[pid].start is not None:
+                            # Only seed when grace is not already active
+                            if time.time() >= float(self._stall_grace_until.get(pid, 0.0)):
+                                self._stall_grace_until[pid] = time.time() + max(1.0, 0.25 * self.granularity_sec)
+                                logging.debug("Local mode grace seeded for %s for ~%.0fs.", pid, 0.25 * self.granularity_sec)
                         if closed is not None:
                             start, o, h, l, c, v = closed
                             logging.debug("LOCAL CANDLE %s @ %ds close=%.8f", pid, self.granularity_sec, c)
@@ -888,9 +1061,91 @@ class TradeBot:
                         self._cur_candle_close[pid] = close
                         continue
                     if start != last_start:
+                        logging.debug("WS: Received candle for %s at %s", pid, c.get("start"))
                         self._on_candle_close(pid, last_start, self._cur_candle_close.get(pid, close))
                         self._last_candle_start[pid] = start
                     self._cur_candle_close[pid] = close
+                    
+    # Add alongside other methods (e.g., just above run_ws_forever)
+    def _watchdog_loop(self):
+        """Out-of-band watchdog that runs even if the SDK WS loop blocks."""
+        step = 1.0
+        while not getattr(self, "stop_requested", False):
+            try:
+                now = time.time()
+                # idle watchdog (warn/reconnect/optional flip)
+                self._maybe_warn_and_recover_idle(now)
+                
+                # REST backstop while WS is dark
+                self._rest_backstop_tick()
+
+                # candle-stall watchdog (debounced; mirrors run_ws_forever)
+                try:
+                    stall_s = int(self._stall_candle_factor) * int(self.granularity_sec)
+                    stalled = []
+                    for pid, last_ts in self._last_candle_close_ts.items():
+                        # Skip if product is in grace (e.g., right after switching to LOCAL)
+                        if now < float(self._stall_grace_until.get(pid, 0.0)):
+                            continue
+                        if last_ts and (now - float(last_ts)) >= stall_s:
+                            stalled.append(pid)
+                    if stalled:
+                        try:
+                            pct = len(stalled) / max(1, len(self.product_ids))
+                        except Exception:
+                            pct = 0.0
+                        majority_thresh = float(getattr(self.cfg, "stall_majority_flip_threshold", 0.6))
+                        if self.candle_mode == "ws" and pct >= majority_thresh:
+                            logging.warning(
+                                "Majority of products stalled (%.0f%%). Switching candle mode to LOCAL aggregation.",
+                                pct * 100.0
+                            )
+                            self.candle_mode = "local"
+                            self._set_local_mode_grace(buckets=1.2)
+
+                        cooldown = int(getattr(self.cfg, "stall_action_cooldown_s", 30))
+                        if now - float(getattr(self, "_last_stall_action_ts", 0.0)) < max(5, cooldown):
+                            self._consecutive_stall_windows += 1
+                        else:
+                            logging.warning(
+                                "Candle stall detected for %s (>%ds without a close). Forcing resubscribe.",
+                                ", ".join(sorted(set(stalled))), stall_s
+                            )
+                            self._subscribe_all()
+                            self._last_stall_action_ts = now
+                            self._consecutive_stall_windows += 1
+
+                            esc_after = int(getattr(self.cfg, "stall_hard_reconnect_after", 2))
+                            if self._consecutive_stall_windows >= max(1, esc_after):
+                                self._force_reconnect("candle stall (watchdog)")
+                                self._consecutive_stall_windows = 0
+                                self._stall_total += 1
+                                flip_after = int(getattr(self.cfg, "stall_flip_to_local_after", 0))
+                                if flip_after > 0 and self.candle_mode != "local" and self._stall_total >= flip_after:
+                                    logging.warning("Repeated candle stalls. Switching candle mode to LOCAL aggregation.")
+                                    self.candle_mode = "local"
+                    else:
+                        self._consecutive_stall_windows = 0
+                except Exception as _stall_e:
+                    logging.debug("Watchdog stall check failed: %s", _stall_e)
+
+                # best-effort ping + periodic resubscribe (keeps state fresh even if WS blocked)
+                try:
+                    ping_every = int(getattr(self.cfg, "ws_ping_interval_s", 30))
+                    if ping_every > 0 and (now - getattr(self, "_last_ping_ts", 0.0)) >= ping_every:
+                        self._ws_ping_best_effort()
+                        self._last_ping_ts = now
+                    resub_every = int(getattr(self.cfg, "ws_resubscribe_interval_s", 900))
+                    if resub_every > 0 and (now - getattr(self, "_last_subscribe_ts", 0.0)) >= resub_every:
+                        logging.info("Reissuing WS subscriptions (watchdog resubscribe).")
+                        self._subscribe_all()
+                except Exception as _hb_e:
+                    logging.debug("Watchdog hb/resubscribe failed: %s", _hb_e)
+
+            except Exception as e:
+                logging.debug("Watchdog loop error: %s", e)
+            time.sleep(step)
+
 
     # -------------------- signal & orders --------------------
     def evaluate_signal(self, product_id: str, price: float, s: float, l: float):
@@ -1731,7 +1986,7 @@ class TradeBot:
                 # Use long lookback ONLY for startup or manual reconcile
                 h = int(getattr(self.cfg, "lookback_hours", 48))
             # Clamp to 6–168h for safety
-            h = max(6, min(h, 168))
+            h = max(1, min(h, 168))
             self.reconcile_recent_fills(h)
         except Exception as e:
             logging.exception("reconcile_now failed: %s", e)
