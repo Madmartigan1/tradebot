@@ -7,6 +7,7 @@ import logging
 import signal
 import argparse
 
+from textwrap import dedent
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -30,30 +31,103 @@ def _str2bool(v: str) -> bool:
     if s in ("0","false","f","no","n","off"):
         return False
     raise argparse.ArgumentTypeError(f"Expected boolean, got {v!r}")
+    
+def _parse_products_arg(s: str):
+    """
+    Supports:
+      - replace:  'BTC-USD,ETH-USD'
+      - add:      '+BTC-USD,ETH-USD'
+      - remove:   '-DOGE-USD,PEPE-USD'
+    Returns (mode, items) where mode in {'replace','add','remove'} and items is a list[str].
+    """
+    if s is None:
+        return None, []
+    txt = str(s).strip()
+    mode = "replace"
+    if txt.startswith("+"):
+        mode, txt = "add", txt[1:]
+    elif txt.startswith("-"):
+        mode, txt = "remove", txt[1:]
+    items = [x.strip().upper() for x in txt.split(",") if x.strip()]
+    return mode, items
+
+# --- pretty help formatter that preserves newlines without overrides ---
+class TradeBotHelp(argparse.RawTextHelpFormatter):
+    def __init__(self, prog):
+        # Wider second column and overall width; RawText keeps your \n formatting
+        super().__init__(prog, max_help_position=34, width=130)
+        
+# Boolean flags as explicit true/false (no --no-* variants)
+_BOOL_KW = {"type": _str2bool, "nargs": "?", "const": True, "metavar": "1|0"}
 
 def parse_cli_overrides(argv=None):
-    p = argparse.ArgumentParser(add_help=True, description="TradeBot")
-    # booleans
-    p.add_argument("--dry-run", dest="dry_run", type=_str2bool, nargs="?", const=True,
-                   help="Paper trade without sending live orders.")
-    p.add_argument("--enable-quartermaster", dest="enable_quartermaster", type=_str2bool, nargs="?", const=True,
-                   help="Enable/disable Quartermaster depletion logic.")
-    # money
-    p.add_argument("--usd-per-order", dest="usd_per_order", type=float,
-                   help="Max USD per buy order.")
-    p.add_argument("--max-spend-cap", dest="daily_spend_cap_usd", type=float,
-                   help="Daily USD spend cap for buys (sells continue).")
-    # add more here later if needed, e.g. --products, --granularity, etc.
-    p.add_argument("--mid-session-reconcile", dest="mid_reconcile_enabled", type=_str2bool, nargs="?", const=True,
-                   help="Enable/disable the mid-session reconcile scheduler (true/false).")
+    p = argparse.ArgumentParser(
+        add_help=True,
+        description="Tradebot — adaptive Coinbase trading bot",
+        formatter_class=TradeBotHelp,
+    )
+    # Organize flags into readable groups
+    g_run = p.add_argument_group("Runtime overrides")
+    g_limits = p.add_argument_group("Limits")
+    g_products = p.add_argument_group("Product selection")
+    
+    # booleans (BooleanOptionalAction removes noisy [METAVAR] and adds --no-*)
+    g_run.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        **_BOOL_KW,
+        help="Paper trade without sending live orders.",
+    )
+    g_run.add_argument(
+        "--enable-quartermaster",
+        dest="enable_quartermaster",
+        **_BOOL_KW,
+        help="Enable or disable Quartermaster depletion logic.",
+    )
+    g_run.add_argument(
+        "--mid-session-reconcile",
+        dest="mid_reconcile_enabled",
+        **_BOOL_KW,
+        help="Enable or disable the mid-session reconcile scheduler.",
+    )
+
+    # money / limits
+    g_limits.add_argument(
+        "--usd-per-order",
+        dest="usd_per_order",
+        type=float,
+        metavar="USD",
+        help="Maximum USD per buy order.",
+    )
+    g_limits.add_argument(
+        "--max-spend-cap",
+        dest="daily_spend_cap_usd",
+        type=float,
+        metavar="USD",
+        help="Daily USD spend cap for buys (sells continue).",
+    )
+
+    # products (multiline example kept tidy with explicit newlines)
+    g_products.add_argument(
+        "--products",
+        dest="products",
+        type=str,
+        metavar="LIST",
+        help=(
+            "Set (+add) or -remove products.\n"
+            "  replace :  'BTC-USD,ETH-USD'\n"
+            "  add     :  '+SOL-USD,AVAX-USD'\n"
+            "  remove  :  '-DOGE-USD,PEPE-USD'"
+        ),
+    )
     return p.parse_known_args(argv)[0]
+    
 
 def _finalize_and_exit(code: int = 0):
     try:
         logging.shutdown()
     finally:
         os._exit(code)
-
 
 def _normalize_log_level(val):
     default = logging.INFO
@@ -69,7 +143,6 @@ def _normalize_log_level(val):
         return getattr(logging, s.upper(), default)
     return default
 
-
 def _setup_logging():
     lvl = getattr(CONFIG, "log_level", "INFO")
     level_int = _normalize_log_level(lvl)
@@ -81,7 +154,6 @@ def _setup_logging():
     logging.getLogger("urllib3").setLevel(max(level_int, logging.WARNING))
     logging.getLogger("websocket").setLevel(max(level_int, logging.WARNING))
     return logging.getLogger("tradebot")
-
 
 def _load_keys_from_envfile():
     """
@@ -105,7 +177,6 @@ def _load_keys_from_envfile():
         _finalize_and_exit(1)
 
     return api_key, api_secret, portfolio_id
-
 
 def _elapsed_autotune_once_with_bot(
     bot: TradeBot,
@@ -188,10 +259,33 @@ def main():
     # Apply CLI overrides before touching CONFIG anywhere else
     args = parse_cli_overrides(sys.argv[1:])
     overrides = {}
+    
+    # Handle --products specially (supports add/remove/replace semantics)
+    if getattr(args, "products", None):
+        mode, symbols = _parse_products_arg(args.products)
+        current = [s.strip().upper() for s in getattr(CONFIG, "product_ids", [])]
+        if mode == "replace":
+            new_list = list(dict.fromkeys(symbols))  # dedupe, keep order
+        elif mode == "add":
+            new_list = list(dict.fromkeys(current + symbols))
+        elif mode == "remove":
+            rm = set(symbols)
+            new_list = [s for s in current if s not in rm]
+        else:
+            new_list = current
+        if new_list:
+            CONFIG.product_ids = new_list
+            overrides["product_ids"] = new_list
+        else:
+            log.warning("After applying --products, product list is empty; keeping default list.")
+        
     for k, v in vars(args).items():
+        if k == "products":
+            continue
         if v is not None:
             setattr(CONFIG, k, v)
             overrides[k] = v
+    
     if overrides:
         log.info("CLI overrides applied: %s", {k: overrides[k] for k in sorted(overrides)})
     

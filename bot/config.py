@@ -132,12 +132,13 @@ class BotConfig:
     prefer_maker_for_sells: bool = True
     maker_offset_bps: float = 10.0
 
+    #Baseline BPS settings. Autotune adjusts these accordingly based on market microstructure(spread/volatility/adverse selection risk).
     maker_offset_bps_per_product: Dict[str, float] = field(default_factory=lambda: {
         # Tier A / very active — trimmed 2 bps
-        "ETH-USD":16.0, "SOL-USD":18.0, "LINK-USD":18.0, "XRP-USD":20.0, "DOGE-USD":20.0, "LTC-USD":18.0,
+        "ETH-USD":14.0, "SOL-USD":16.0, "LINK-USD":14.0, "XRP-USD":18.0, "DOGE-USD":20.0, "LTC-USD":18.0,
 
         # Tier B — light trim where fills lagged; others unchanged
-        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":20.0, "NEAR-USD":20.0, "TRAC-USD":20.0,
+        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":20.0, "NEAR-USD":18.0, "TRAC-USD":18.0,
 
         # Tier C / thinner or slower — mostly unchanged (small trims only where safe)
         "ALGO-USD":20.0, "XLM-USD":18.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0, "POL-USD":22.0,
