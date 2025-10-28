@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
+## [1.1.3] – 2025-10-28
+### Added
+- **Short-TTL live-balance cache:** `_get_live_available_base()` now caches Coinbase `get_accounts` results for 20 seconds to reduce API load and tolerate brief 5xx outages.
+- **Graceful 5xx fallback:** if Coinbase returns `503` or similar, the bot now falls back to cached or portfolio data, keeping Quartermaster and SELL logic operational.
+- **Thread architecture documentation:** detailed section added to `OpsManual.docx`, outlining every thread’s role (Main, WebSocket, Watchdog, Mid-Reconcile Scheduler/Worker, AutoTune).
+
+### Changed
+- **REST retry tuning:** increased backoff window to 0.5–2.5s and retry attempts from 3→6 for smoother recovery during transient API failures.
+- **Local mode resilience:** verified seamless fallback from WebSocket to local aggregation during unstable connections.
+
+### Docs
+- **OpsManual.docx** formatted and expanded with new thread info.
+- **CHANGELOG.md** updated for connectivity and watchdog improvements.
+
+
 ## [1.1.2] – 2025-10-26
 ### Added
 - **CLI overrides in `main.py`**: run-time flags now override `config.py` without editing files:
@@ -17,7 +32,6 @@ This format loosely follows *Keep a Changelog* and uses tags for versions.
 - **AutoTune BLEND corridor**: removed the 0.69–0.70 dead-zone. Any winner with `share ≥ 0.55 and < 0.70` enters **BLEND**.
 - **Near-SNAP midpoint behavior**: when `0.65 ≤ share < 0.70`, the target is the midpoint between **winner** and **choppy** presets, then blended via the existing alpha curve. This keeps nudges gentle and symmetric for both uptrend and downtrend winners.
 - **Startup logs** now show CLI overrides (if any) before advisor/quartermaster/candle lines for clarity.
-- Placed mid-session reconciliation on its own separate thread.
 
 ### Docs
 - **USAGE.md** updated with example CLI flags.

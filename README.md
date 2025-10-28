@@ -1,4 +1,4 @@
-# Tradebot v1.1.2
+# Tradebot v1.1.3
 
 [![Latest version](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver&include_prereleases)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -11,7 +11,7 @@
 
 ---
 
-⚙️ **Improved autotune BLEND functionality. Added CLI overrides. Fixed mid-session reconciliation thread.**
+⚙️ **Maintenance, resilience, and connectivity upgrades**
 
 ---
 
@@ -64,13 +64,14 @@ Together they form a chain of command:
 
 ---
 
-## ✨ v1.1.2 Highlights
+## ✨ v1.1.3 Highlights
 - **Command-line overrides**: you can now change core settings at runtime without editing files.
   Examples:
   ```bash
   python main.py --dry-run=true
   python main.py --enable-quartermaster=false
   python main.py --usd-per-order=30 --max-spend-cap=300
+  python main.py --help
   ```
 - **Quartermaster 2.0**  
   The Take-Profit & Stagnation Officer now includes:
@@ -94,6 +95,8 @@ Together they form a chain of command:
   
 - **Smarter BLEND regime weighting**  
   AutoTune now applies quantized, weighted, and bounded adjustments instead of fractional drifts — leading to more stable transitions between choppy and trending modes.
+
+- Connectivity resilience improved; reduced REST spam; calculated fallback handling during Coinbase downtime without    interrupting trade flow.
 
 ---
 

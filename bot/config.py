@@ -1,4 +1,4 @@
-# ----v1.1.1----
+# ----v1.1.3----
 # bot/config.py
 import logging
 from dataclasses import dataclass, field
@@ -49,10 +49,10 @@ class BotConfig:
     dry_run: bool = False
     # Max amount per trade and total trade amount per run
     usd_per_order: float = 30
-    daily_spend_cap_usd: float = 300.0  # buys stop after cap; sells continue
+    daily_spend_cap_usd: float = 60.0  # buys stop after cap; sells continue
     
     # -------- Candles v1.1.0 --------
-    mode: str = "ws"                # "ws" server side candle builds or "local" if you want local aggregation, ws is fine by default.
+    mode: str = "local"                # "ws" server side candle builds or "local" for local candle building
     candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
     min_candles: int = 120             # wait for indicator warm-up
     confirm_candles: int = 3           # consecutive cross confirms (3 for daytime, 2 for night)
@@ -104,7 +104,7 @@ class BotConfig:
     
     # --- v1.0.3: Reconciliation during the session ---
     mid_reconcile_enabled: bool = True
-    mid_reconcile_interval_minutes: int = 60   # hourly sweep
+    mid_reconcile_interval_minutes: int = 90   # Sweep every [int]minutes
     reconcile_on_sell_attempt: bool = False    # disabled since it was causing connectivity issues
 
     # EMA (global)
@@ -130,14 +130,14 @@ class BotConfig:
     # Maker/post-only
     prefer_maker: bool = True
     prefer_maker_for_sells: bool = True
-    maker_offset_bps: float = 5.0
+    maker_offset_bps: float = 10.0
 
     maker_offset_bps_per_product: Dict[str, float] = field(default_factory=lambda: {
         # Tier A / very active — trimmed 2 bps
         "ETH-USD":16.0, "SOL-USD":18.0, "LINK-USD":18.0, "XRP-USD":20.0, "DOGE-USD":20.0, "LTC-USD":18.0,
 
         # Tier B — light trim where fills lagged; others unchanged
-        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":22.0, "NEAR-USD":20.0, "TRAC-USD":22.0,
+        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":20.0, "NEAR-USD":20.0, "TRAC-USD":20.0,
 
         # Tier C / thinner or slower — mostly unchanged (small trims only where safe)
         "ALGO-USD":20.0, "XLM-USD":18.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0, "POL-USD":22.0,
@@ -191,30 +191,36 @@ class BotConfig:
     runloop_max_retries: int = 5
 
     # --- REST retry + pacing knobs ---
-    rest_retry_attempts: int = 3
-    rest_retry_backoff_min_ms: int = 200
-    rest_retry_backoff_max_ms: int = 600
+    rest_retry_attempts: int = 6
+    rest_retry_backoff_min_ms: int = 600
+    rest_retry_backoff_max_ms: int = 2400
     rest_retry_on_status: List[int] = field(default_factory=lambda: [429,500,502,503,504])
-    rest_rps_soft_limit: float = 8.0
+    rest_rps_soft_limit: float = 6.0
+    live_balance_ttl_s: int = 20
 
     # --- Quartermaster dust guard knobs (already effective even if not exposed) ---
     qm_dust_suppress_minutes: int = 30
     qm_sell_buffer_mult: float = 1.0
 
     # --- WS liveness/keepalive ---
-    ws_idle_warn_s: int = 30              # warn if no WS msg in 45s
-    ws_idle_reconnect_s: int = 90         # force reconnect if idle >180s
-    ws_resubscribe_interval_s: int = 900  # reissue subscriptions every 15 min
-    ws_ping_interval_s: int = 20          # best-effort ping cadence (if SDK supports it)
-    ws_idle_flip_to_local_after: int = 3  # 0=disabled; else after N reconnects, switch to local candles
+    ws_idle_warn_s: int = 60                 # warn if no WS msg in [int]s
+    ws_idle_reconnect_s: int = 120           # force reconnect if idle >[int]s
+    ws_resubscribe_interval_s: int = 1800    # reissue subscriptions every [int]s
+    ws_ping_interval_s: int = 20             # best-effort ping cadence (if SDK supports it)
+    ws_idle_flip_to_local_after: int = 3     # 0=disabled; else after N reconnects, switch to local candles
     
-    stall_candle_factor = 3            # stalled if no close for 3 × granularity_sec
+    stall_candle_factor = 2            # stalled if no close for 2 × granularity_sec
     stall_hard_reconnect_after = 3     # after 3 stall detections in a row, hard reconnect
     stall_flip_to_local_after = 3      # after 3 total stalls this session, switch to local candles
-    # (Optional) also consider lowering:
-    ws_resubscribe_interval_s = 900    # periodic resubscribe cadence 900s = every 15 minutes
+    stall_action_cooldown_s: int = 30
+    stall_majority_flip_threshold: float = 0.5
+    
+    enable_rest_backstop = True          # turn on/off the backstop
+    rest_backstop_idle_s = 45            # WS idle threshold to start polling
+    rest_backstop_period_s = 10          # min seconds between REST polls
+    rest_backstop_warmup = 2             # walk forward a couple of recent closes
     
     # Telemetry
-    telemetry_heartbeat_s: int = 1800   # 30 min; set 0 to disable
+    telemetry_heartbeat_s: int = 300   # 5 min; set 0 to disable
 
 CONFIG = BotConfig()
