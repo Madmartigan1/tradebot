@@ -3,6 +3,42 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+## [1.1.4] – 2025-10-29
+### Added
+- **Comprehensive CLI overrides** — nearly every tunable runtime parameter can now be set from the command line:
+  - Runtime flags: `--enable-autotune`, `--enable-quartermaster`, `--mid-session-reconcile`, `--enable-advisors`
+  - Candle options: `--candle-mode ws|local`, `--candle-interval`, `--lookback-hours`
+  - Quartermaster: `--quartermaster-profit`, `--quartermaster-hold-time`, `--quartermaster-stagnation-exit`
+  - Risk & pacing: `--cooldown-time`, `--stop-loss`, `--deadband`, `--confirm-candles`
+  - Maker & order routing: `--prefer-maker`, `--prefer-maker-for-sells`, `--maker-offset`
+  - All flags support inline help (`python main.py -h`) and can override config defaults without editing files.
+- **AutoTune transparency:** Help epilog now documents which parameters AutoTune dynamically adjusts (`confirm_candles`, `cooldown`, `RSI/MACD`, `ema_deadband_bps`, and per-coin maker offsets).
+- **Defaults & help polish:** Help output shows all live defaults from `config.py`, grouped into logical sections (Runtime, Limits, Candles, Quartermaster, Risk, Maker, etc.).
+- **Manual parameter mode:** Added usage hint showing how to disable AutoTune and run fully manual parameters:  
+  `python main.py --enable-autotune=0 --confirm-candles=1 --cooldown-time=200 --deadband=4`
+- **Formatting refinement:** Wider help column alignment (`max_help_position=50`) prevents line wrapping for long flag descriptions.
+
+### Changed
+- **main.py** refactored to dynamically build help epilog with current config defaults and AutoTune notes.
+- **AutoTune advisory section** now clearly distinguishes which values are overridden vs static.
+- **Argument parsing** improved for boolean flags (accepts `1|0`, `true|false`, `yes|no`, etc.).
+- **Help page redesign:** All groups (Runtime, Limits, Coins, etc.) now render cleanly with readable indentation.
+
+### Notes
+- No schema, config, or CSV format changes.
+- Fully backward compatible with v1.1.3 sessions.
+- CLI overrides are logged at startup for full transparency:  
+  `CLI overrides applied: {'dry_run': True, 'candle_interval': '1m', ...}`
+
+### Developer Notes
+- The CLI parser now uses **`argparse.RawTextHelpFormatter`** with `max_help_position=50` for aligned multi-column output.
+- **Defaults auto-population:** Defaults in the help footer are dynamically pulled from the current `CONFIG` dataclass instance — ensuring help text always reflects real runtime values.
+- **Epilog assembly:** The epilog concatenates two sections:
+  1. Defaults block (live-config introspection)
+  2. AutoTune section explaining override behavior and manual mode example
+- Boolean flags use a shared `_BOOL_KW` dict to unify parsing style (`1|0`, `true|false`, etc.).
+- `--coins` parsing supports `+add`, `-remove`, and full replacement modes (`BTC-USD,ETH-USD`).
+
 
 ## [1.1.3] – 2025-10-28
 ### Added

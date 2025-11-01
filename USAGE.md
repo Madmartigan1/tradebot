@@ -44,6 +44,12 @@ python main.py --enable-quartermaster=false
 
 # Adjust per-order size and daily cap
 python main.py --usd-per-order=30 --max-spend-cap=300
+
+# Choose coins to trade (see help page for combinations)
+python main.py --coins=BTC-USD,ALGO-USD,PEPE-USD,AVAX-USD
+
+# See the help page for detailed info
+python main.py --help
 ```
 
 
