@@ -1,4 +1,4 @@
-# bot/autotune.py (v1.1.2) — telemetry + better BLEND tuning + caller-controlled lookback
+# bot/autotune.py (v1.1.4) — telemetry + better BLEND tuning + caller-controlled lookback
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -56,13 +56,22 @@ def _parse_ts_to_epoch(t) -> int:
             return 0
 
 
-def _fetch_closes(rest, product_id: str, gran_sec: int, hours: int) -> List[float]:
-    end = int(datetime.now(timezone.utc).timestamp())
-    start = end - hours * 3600
+def _align_to_bucket(ts_epoch: int, bucket_sec: int) -> int:
+    return int(ts_epoch) - (int(ts_epoch) % max(1, int(bucket_sec)))
+    
+def _fetch_closes(rest, coin_id: str, gran_sec: int, hours: int) -> List[float]:
+    # Align to closed buckets and send UNIX seconds (ints); keep window ≤350 buckets.
+    end_raw = int(datetime.now(timezone.utc).timestamp())
+    end_start = _align_to_bucket(end_raw - 1, gran_sec)   # last CLOSED bucket start
+    # Convert requested hours to buckets; clamp to ≤350
+    requested_buckets = max(1, int((hours * 3600) // max(1, gran_sec)))
+    want = min(requested_buckets, 350)
+    start = end_start - want * gran_sec
+    end_excl = end_start + gran_sec                       # treat 'end' as exclusive
     r = rest.get_candles(
-        product_id=product_id,
-        start=str(start),
-        end=str(end),
+        product_id=coin_id,
+        start=int(start),
+        end=int(end_excl),
         granularity=_granularity_enum(gran_sec),
     )
     arr = (getattr(r, "to_dict", lambda: r)() or {}).get("candles", [])
@@ -105,16 +114,16 @@ def detect_regime_for_prices(prices: List[float], deadband_bps: float = 8.0, mac
 
 
 # ---------------------------
-# CSV-driven product stats (3-day window)
+# CSV-driven coin stats (3-day window)
 # ---------------------------
 @dataclass
-class ProductStats:
+class CoinStats:
     pnl_proxy_3d: float = 0.0
     trades_3d: int = 0
 
 
-def _read_csv_3d_stats(csv_path: str) -> Dict[str, ProductStats]:
-    out: Dict[str, ProductStats] = {}
+def _read_csv_3d_stats(csv_path: str) -> Dict[str, CoinStats]:
+    out: Dict[str, CoinStats] = {}
     if not os.path.exists(csv_path):
         return out
 
@@ -139,10 +148,10 @@ def _read_csv_3d_stats(csv_path: str) -> Dict[str, ProductStats]:
             r = csv.DictReader(f)
             for row in r:
                 # Headers you keep:
-                # ts, order_id, side, product, size, price, quote_usd, fee, liquidity, pnl,
+                # ts, order_id, side, coin, size, price, quote_usd, fee, liquidity, pnl,
                 # position_after, cost_basis_after, intent_price, slippage_abs, slippage_bps,
                 # hold_time_sec, entry_reason, exit_reason
-                pid = (row.get("product") or "").strip()
+                pid = (row.get("coin") or "").strip()
                 ts = (row.get("ts") or "").strip()
                 if not pid or not ts:
                     continue
@@ -159,7 +168,7 @@ def _read_csv_3d_stats(csv_path: str) -> Dict[str, ProductStats]:
 
                 pnl_bps = (pnl_abs / quote_usd) * 10_000.0 if quote_usd > 0 else 0.0
 
-                hit = out.setdefault(pid, ProductStats())
+                hit = out.setdefault(pid, CoinStats())
                 hit.pnl_proxy_3d += pnl_bps
                 hit.trades_3d += 1
     except Exception:
@@ -174,7 +183,7 @@ def _read_csv_3d_stats(csv_path: str) -> Dict[str, ProductStats]:
 # ---------------------------
 V102_CHOPPY = {
     "confirm_candles": 3,
-    "per_product_cooldown_s": 600,
+    "per_coin_cooldown_s": 600,
     "rsi_buy_max": 65.0,
     "rsi_sell_min": 35.0,
     "macd_buy_min": 2.0,
@@ -185,7 +194,7 @@ REGIME_TARGETS = {
     "choppy": V102_CHOPPY,
     "uptrend": {
         "confirm_candles": 2,
-        "per_product_cooldown_s": 420,
+        "per_coin_cooldown_s": 420,
         "rsi_buy_max": 72.0,
         "rsi_sell_min": 40.0,
         "macd_buy_min": 1.5,
@@ -194,7 +203,7 @@ REGIME_TARGETS = {
     },
     "downtrend": {
         "confirm_candles": 2,
-        "per_product_cooldown_s": 900,
+        "per_coin_cooldown_s": 900,
         "rsi_buy_max": 60.0,
         "rsi_sell_min": 30.0,
         "macd_buy_min": 2.5,
@@ -205,7 +214,7 @@ REGIME_TARGETS = {
 CLAMPS_BY_REGIME: Dict[str, Dict[str, Tuple[Optional[float], Optional[float]]]] = {
     "choppy": {
         "confirm_candles": (2, 5),
-        "per_product_cooldown_s": (300, 1800),
+        "per_coin_cooldown_s": (300, 1800),
         "rsi_buy_max": (60, 70),
         "rsi_sell_min": (30, 40),
         "macd_buy_min": (1.0, 3.0),
@@ -214,7 +223,7 @@ CLAMPS_BY_REGIME: Dict[str, Dict[str, Tuple[Optional[float], Optional[float]]]] 
     },
     "uptrend": {
         "confirm_candles": (1, 3),
-        "per_product_cooldown_s": (300, 1200),
+        "per_coin_cooldown_s": (300, 1200),
         "rsi_buy_max": (65, 75),
         "rsi_sell_min": (35, 45),
         "macd_buy_min": (1.0, 3.0),
@@ -223,7 +232,7 @@ CLAMPS_BY_REGIME: Dict[str, Dict[str, Tuple[Optional[float], Optional[float]]]] 
     },
     "downtrend": {
         "confirm_candles": (1, 3),
-        "per_product_cooldown_s": (300, 1200),
+        "per_coin_cooldown_s": (300, 1200),
         "rsi_buy_max": (55, 65),
         "rsi_sell_min": (25, 40),
         "macd_buy_min": (2.0, 4.0),
@@ -261,7 +270,7 @@ def _blend_clamp(name: str, r1: str, r2: str):
 
 BLEND_KNOBS = {
     "confirm_candles",
-    "per_product_cooldown_s",
+    "per_coin_cooldown_s",
     "rsi_buy_max",
     "rsi_sell_min",
     "macd_buy_min",
@@ -291,7 +300,7 @@ _KNOB_WEIGHT = {
     "rsi_buy_max":      0.5,
     "rsi_sell_min":     0.5,
     "confirm_candles":  0.3,   # slowest
-    "per_product_cooldown_s": 0.4,
+    "per_coin_cooldown_s": 0.4,
 }
 
 def _alpha_from_share(winner_share: float) -> float:
@@ -359,7 +368,7 @@ def _compute_portfolio_vote(
     vote = {"uptrend": 0, "downtrend": 0, "choppy": 0}
     deadband_bps = float(getattr(cfg, "ema_deadband_bps", 8.0))
 
-    for pid in getattr(cfg, "product_ids", []):
+    for pid in getattr(cfg, "coin_ids", []):
         try:
             prices = _fetch_closes(rest, pid, gran_sec, hours) if rest else []
         except Exception:
@@ -453,8 +462,8 @@ def autotune_config(
                 if lo is not None:
                     proposed = max(lo, min(hi, proposed))
 
-                # integers: confirm_candles and (for stability) per_product_cooldown_s
-                if name in {"confirm_candles", "per_product_cooldown_s"}:
+                # integers: confirm_candles and (for stability) per_coin_cooldown_s
+                if name in {"confirm_candles", "per_coin_cooldown_s"}:
                     proposed = int(round(proposed))
                 changes[name] = _apply_and_record(name, proposed)
             else:
@@ -466,7 +475,7 @@ def autotune_config(
 
     disabled: List[str] = []
     disabled_reasons: Dict[str, str] = {}
-    offsets: Dict[str, float] = dict(getattr(cfg, "maker_offset_bps_per_product", {}) or {})
+    offsets: Dict[str, float] = dict(getattr(cfg, "maker_offset_bps_per_coin", {}) or {})
     default_off = float(getattr(cfg, "maker_offset_bps", 5.0))
     kpi = _read_csv_3d_stats(os.path.join(".state", "trades.csv"))
     startup_kpi_empty = (len(kpi) == 0)  # suppress noisy 'no_kpi' telemetry on cold start
@@ -476,7 +485,7 @@ def autotune_config(
     floor_other = float(getattr(cfg, "maker_offset_floor_other_bps", OFFSET_FLOOR_OTHER))
     ceil_all = float(getattr(cfg, "maker_offset_ceil_bps", OFFSET_CEIL))
 
-    for pid in getattr(cfg, "product_ids", []):
+    for pid in getattr(cfg, "coin_ids", []):
         base = float(offsets.get(pid, default_off))
         st = kpi.get(pid)
         if st and st.trades_3d > 0:
@@ -501,10 +510,10 @@ def autotune_config(
 
     if not preview_only:
         # Apply tuned offsets always
-        setattr(cfg, "maker_offset_bps_per_product", offsets)
+        setattr(cfg, "maker_offset_bps_per_coin", offsets)
         # Only actually "disable" if SNAP & non-choppy
         if allow_disabling:
-            setattr(cfg, "products_disabled", sorted(disabled))
+            setattr(cfg, "coins_disabled", sorted(disabled))
 
     knob_changes = {k: {"old": ov[0], "new": ov[1]} for k, ov in changes.items()}
     return {
@@ -517,7 +526,7 @@ def autotune_config(
         "vote_meta": meta,  # exposes hours/granularity/min_candles used
         "knob_changes": knob_changes,
         "global_changes": {k: f"{ov[0]}→{ov[1]}" for k, ov in changes.items()},
-        "disabled_products": sorted(disabled),            # telemetry, shown by main if non-empty
+        "disabled_coins": sorted(disabled),            # telemetry, shown by main if non-empty
         "disabled_details": {k: disabled_reasons[k] for k in sorted(disabled_reasons)},
         "offsets_changed": {k: offsets[k] for k in offsets},
     }

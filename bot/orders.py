@@ -21,7 +21,7 @@ def decimals_from_inc(inc: float) -> int:
     return len(s.split(".")[1]) if "." in s else 0
 
 def compute_maker_limit(
-    product_id: str, side: str, last_price: float, price_inc: float, base_inc: float,
+    coin_id: str, side: str, last_price: float, price_inc: float, base_inc: float,
     usd_per_order: float, offset_bps: float, bid: float | None = None, ask: float | None = None
 ) -> Tuple[float, float]:
     side = side.upper()

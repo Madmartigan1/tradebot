@@ -37,22 +37,22 @@ def validate_config(cfg: "BotConfig"):
 
 @dataclass
 class BotConfig:
-    # Products (global settings apply to all)
-    product_ids: List[str] = field(default_factory=lambda: [
-        "ETH-USD","XRP-USD","ADA-USD","TRAC-USD","ALGO-USD","XLM-USD","HBAR-USD", "FIL-USD",
+    # Coins (global settings apply to all)
+    coin_ids: List[str] = field(default_factory=lambda: [
+        "ETH-USD","XRP-USD","ADA-USD","TRAC-USD","ALGO-USD","XLM-USD","HBAR-USD",
         "NEAR-USD","SOL-USD","DOGE-USD","AVAX-USD","LINK-USD","SUI-USD","LTC-USD","CRO-USD",
-        "DOT-USD","ARB-USD", "IP-USD", "WLFI-USD", "FLOKI-USD", "PEPE-USD", "BONK-USD", 
+        "DOT-USD","ARB-USD", "IP-USD", "FLOKI-USD", "PEPE-USD", "BONK-USD", 
         "SEI-USD", "SHIB-USD", "POL-USD",
     ])
     
     # Dry run used for paper trading. Set to False for live trading
     dry_run: bool = False
     # Max amount per trade and total trade amount per run
-    usd_per_order: float = 30
-    daily_spend_cap_usd: float = 60.0  # buys stop after cap; sells continue
+    usd_per_order: float = 10
+    daily_spend_cap_usd: float = 120.0  # buys stop after cap; sells continue
     
     # -------- Candles v1.1.0 --------
-    mode: str = "local"                # "ws" server side candle builds or "local" for local candle building
+    mode: str = "ws"                   # "ws" server side candle builds or "local" for local candle building
     candle_interval: str = "5m"        # "1m" | "5m" | "15m" ...
     min_candles: int = 120             # wait for indicator warm-up
     confirm_candles: int = 3           # consecutive cross confirms (3 for daytime, 2 for night)
@@ -124,7 +124,7 @@ class BotConfig:
     macd_sell_max: float = -2.0        # SELL only if MACD ≤ −2.0 bps
 
     # Ops / Risk
-    per_product_cooldown_s: int = 600   # Wait time in seconds, per coin, before it trades again
+    per_coin_cooldown_s: int = 600   # Wait time in seconds, per coin, before it trades again
     hard_stop_bps: Optional[int] = 300  # emergency stop loss if asset drops below 3.0%
 
     # Maker/post-only
@@ -133,18 +133,18 @@ class BotConfig:
     maker_offset_bps: float = 10.0
 
     #Baseline BPS settings. Autotune adjusts these accordingly based on market microstructure(spread/volatility/adverse selection risk).
-    maker_offset_bps_per_product: Dict[str, float] = field(default_factory=lambda: {
+    maker_offset_bps_per_coin: Dict[str, float] = field(default_factory=lambda: {
         # Tier A / very active — trimmed 2 bps
         "ETH-USD":14.0, "SOL-USD":16.0, "LINK-USD":14.0, "XRP-USD":18.0, "DOGE-USD":20.0, "LTC-USD":18.0,
 
         # Tier B — light trim where fills lagged; others unchanged
-        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "FIL-USD":20.0, "NEAR-USD":18.0, "TRAC-USD":18.0,
+        "ADA-USD":20.0, "AVAX-USD":18.0, "DOT-USD":16.0, "ARB-USD":20.0, "NEAR-USD":18.0, "TRAC-USD":18.0,
 
         # Tier C / thinner or slower — mostly unchanged (small trims only where safe)
         "ALGO-USD":20.0, "XLM-USD":18.0, "CRO-USD":22.0, "SUI-USD":22.0, "HBAR-USD":20.0, "POL-USD":22.0,
 
         # Other altcoins(EXPERIMENTAL)
-        "IP-USD":22.0, "WLFI-USD":22.0, "FLOKI-USD":24.0, "PEPE-USD":24.0, "BONK-USD":22.0, 
+        "IP-USD":22.0, "FLOKI-USD":24.0, "PEPE-USD":24.0, "BONK-USD":22.0, 
         "SEI-USD":24.0, "SHIB-USD":20.0,
     })
 
@@ -164,7 +164,7 @@ class BotConfig:
     # ----- Autotune automatically sets these values based on market condidtions. Code below is irrelevant. ------------
     # Per-asset time-to-fill targets, in candles (matches 5m global candles)
     # Tier A (aim ≤1), Tier B (≤2), Tier C (≤3)
-    #ttf_target_candles_per_product: Dict[str, int] = field(default_factory=lambda: {
+    #ttf_target_candles_per_coin: Dict[str, int] = field(default_factory=lambda: {
         # Tier A
         #"ETH-USD":1, "SOL-USD":1, "LINK-USD":1, "LTC-USD":1, "XRP-USD":1, "DOGE-USD":1,
         # Tier B
@@ -175,7 +175,7 @@ class BotConfig:
     # --------------------------------------------------------------------------------------------------------------------
 
     # Disable per-coin EMA overrides for “global” behavior
-    ema_params_per_product: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    ema_params_per_coin: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
     # Misc
     processed_fills_max: int = 10000

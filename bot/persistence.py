@@ -46,10 +46,10 @@ def _rotate_if_big(log_path: Path, max_mb: int = 10, backups: int = 3):
     except Exception:
         pass
 
-def log_trade_line(product_id: str, side: str, usd_amount: float, price: float, quantity: float, dry_run: bool):
+def log_trade_line(coin_id: str, side: str, usd_amount: float, price: float, quantity: float, dry_run: bool):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     entry = (
-        f"{ts} | {side:<4} {product_id:<10} "
+        f"{ts} | {side:<4} {coin_id:<10} "
         f"USD ${usd_amount:.2f} @ ${price:.6f} "
         f"Qty {quantity:.8f} "
         f"{'(DRY RUN)' if dry_run else ''}\n"
@@ -96,8 +96,8 @@ class LastTradeTracker:
     def __init__(self):
         self.data = load_json(LASTTRADE_FILE, {})
 
-    def ok(self, product_id: str, cooldown_sec: int) -> bool:
-        t = self.data.get(product_id)
+    def ok(self, coin_id: str, cooldown_sec: int) -> bool:
+        t = self.data.get(coin_id)
         if not t:
             return True
         try:
@@ -105,8 +105,8 @@ class LastTradeTracker:
         except Exception:
             return True
 
-    def stamp(self, product_id: str):
-        self.data[product_id] = time.time()
+    def stamp(self, coin_id: str):
+        self.data[coin_id] = time.time()
         save_json(LASTTRADE_FILE, self.data)
 
 @dataclass
