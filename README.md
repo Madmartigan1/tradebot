@@ -72,7 +72,7 @@ Together they form a chain of command:
   ```
 ---
 
-### Upgrade notes
+### 🔧 Upgrade notes
 - Improved BLEND functionality with autotune.
 - Added CLI overrides.
 - Backward-compatible with v1.0.9 state files.  
@@ -81,14 +81,14 @@ Together they form a chain of command:
 
 ---
 
-### Developer Notes
+### 🧑‍💻 Developer Notes
 - The CLI system now builds help text dynamically using live values from `config.py`.
 - Boolean flags use a unified `_BOOL_KW` parser shared across runtime and maker options.
 - Help epilog automatically includes both defaults and AutoTune behavior notes.
 
 ---
 
-## Risk controls
+## ⚖️ Risk controls
 
 - **Daily BUY cap**: limits the number of BUYs per day to curb overtrading during chop. Logged as  
   `**********Daily BUY cap reached (N). Skipping further BUYs.**********`
