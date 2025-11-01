@@ -1,4 +1,4 @@
-# bot/tradebot.py — v1.1.3
+# bot/tradebot.py — v1.1.4
 # Adds:
 #  - Quartermaster exits (x% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
@@ -22,7 +22,7 @@ from coinbase.websocket import WSClient
 
 # --- Candle helpers ---
 class CandleBuilder:
-    """Simple per-product OHLCV builder for fixed-second buckets from ticker events."""
+    """Simple per-coin OHLCV builder for fixed-second buckets from ticker events."""
     def __init__(self, bucket_sec: int):
         self.bucket = int(bucket_sec)
         self.start = None  # epoch seconds (bucket start)
@@ -63,6 +63,16 @@ def _parse_ws_iso(ts: str | None) -> float:
     except Exception:
         return time.time()
 
+def _to_iso(ts_epoch: int | float) -> str:
+    """Epoch seconds → ISO-8601 UTC (…Z) for Coinbase REST candles."""
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(float(ts_epoch), tz=timezone.utc).isoformat().replace("+00:00","Z")
+
+def _align_to_bucket(ts_epoch: int | float, bucket_sec: int) -> int:
+    """Floor timestamp to the start of its candle bucket."""
+    b = int(bucket_sec) if bucket_sec and bucket_sec > 0 else 60
+    t = int(ts_epoch)
+    return t - (t % b)
 
 def _granularity_enum(gran_sec: int) -> str:
     mapping = {
@@ -128,20 +138,20 @@ class TradeBot:
         self.cfg = cfg
         # live-balance cache (per base asset)
         self._acct_cache: Dict[str, dict] = {}  # base -> {"ts": epoch, "avail": float}
-        # Local-candle settle queue: (release_ts, product_id, start_sec, close_price)
+        # Local-candle settle queue: (release_ts, coin_id, start_sec, close_price)
         self._local_settle_q = deque()
         # default settle delay (ms); override via CONFIG.local_close_settle_ms if present
         self._local_settle_ms = int(getattr(self.cfg, "local_close_settle_ms", 150))
         self.portfolio_id = portfolio_id if portfolio_id is not None else getattr(cfg, "portfolio_id", None)
         self._balances: Dict[str, float] = {}
         
-        # Core per-product state
+        # Core per-coin state
         self.ticks: Dict[str, int] = defaultdict(int)  # counts candles in candle mode
-        self.min_ticks_per_product: Dict[str, int] = {}
+        self.min_ticks_per_coin: Dict[str, int] = {}
         self._trend = defaultdict(int)   # -1 below, 0 band, +1 above
         self._primed = set()             # first crossover primes only (no trade)
-        self._pending = {}               # product_id -> {"rel": +/-1/0, "count": N}
-        self._qm_last_ts = defaultdict(float)  # last time Quartermaster SELL fired per product
+        self._pending = {}               # coin_id -> {"rel": +/-1/0, "count": N}
+        self._qm_last_ts = defaultdict(float)  # last time Quartermaster SELL fired per coin
         self._qm_dust_suppress_until = defaultdict(float)  # suppress dust exits until epoch time
         
         # Thread locking to prevent races in state + CSV writes
@@ -171,14 +181,14 @@ class TradeBot:
         
     def _set_local_mode_grace(self, buckets: float = 1.2):
         """
-        Give each product a grace window after switching to LOCAL aggregation so the
+        Give each coin a grace window after switching to LOCAL aggregation so the
         stall watchdog does not thrash while the first local candle is forming.
         'buckets' is a multiplier of granularity_sec.
         """
         horizon = time.time() + max(1.0, float(self.granularity_sec) * float(buckets))
-        for pid in self.product_ids:
+        for pid in self.coin_ids:
             self._stall_grace_until[pid] = horizon
-        logging.info("Stall watchdog grace set for all products until %.0f (%.0fs).", horizon, horizon - time.time())
+        logging.info("Stall watchdog grace set for all coins until %.0f (%.0fs).", horizon, horizon - time.time())
         
     def _flush_local_settle(self, now_ts: float | None = None):
         """Emit any settled local candles whose release time has arrived."""
@@ -214,12 +224,12 @@ class TradeBot:
         self.ws = WSClient(api_key=self.api_key, api_secret=self.api_secret, on_message=on_msg)
 
         
-        # Products
-        self.product_ids = list(getattr(self.cfg, "product_ids", []))
-        if not self.product_ids:
-            raise ValueError("No product_ids provided in config.")
+        # Coins
+        self.coin_ids = list(getattr(self.cfg, "coin_ids", []))
+        if not self.coin_ids:
+            raise ValueError("No coin_ids provided in config.")
 
-        # Indicators and per-product params
+        # Indicators and per-coin params
         self.short: Dict[str, EMA] = {}
         self.long: Dict[str, EMA] = {}
 
@@ -227,14 +237,14 @@ class TradeBot:
         self.enable_advisors: bool = bool(
             getattr(self.cfg, "enable_advisors", getattr(self.cfg, "use_advisors", False))
         )
-        self._rsi = {p: RSI(period=int(getattr(self.cfg, "rsi_period", 14))) for p in self.product_ids}
+        self._rsi = {p: RSI(period=int(getattr(self.cfg, "rsi_period", 14))) for p in self.coin_ids}
         self._macd = {
             p: MACD(
                 fast=int(getattr(self.cfg, "macd_fast", 12)),
                 slow=int(getattr(self.cfg, "macd_slow", 26)),
                 signal=int(getattr(self.cfg, "macd_signal", 9)),
             )
-            for p in self.product_ids
+            for p in self.coin_ids
         }
     
         # One-sided RSI/MACD veto settings
@@ -283,25 +293,25 @@ class TradeBot:
         _ci2sec = {"1m":60,"5m":300,"15m":900,"30m":1800,"1h":3600,"2h":7200,"4h":14400,"6h":21600,"1d":86400}
         self.granularity_sec = int(_ci2sec.get(ci, int(getattr(self.cfg, "granularity_sec", 300))))
 
-        self._last_candle_start: Dict[str, int | None] = {p: None for p in self.product_ids}
-        self._cur_candle_close: Dict[str, float | None] = {p: None for p in self.product_ids}
-        self._builders: Dict[str, CandleBuilder] = {p: CandleBuilder(self.granularity_sec) for p in self.product_ids}
+        self._last_candle_start: Dict[str, int | None] = {p: None for p in self.coin_ids}
+        self._cur_candle_close: Dict[str, float | None] = {p: None for p in self.coin_ids}
+        self._builders: Dict[str, CandleBuilder] = {p: CandleBuilder(self.granularity_sec) for p in self.coin_ids}
         
         # Visibility: make candle mode explicit in logs
         logging.info("Candle mode: %s (interval=%ds)", self.candle_mode.upper(), self.granularity_sec)
         
         self._live_bal_ttl = int(getattr(self.cfg, "live_balance_ttl_s", 20))
         
-        # EMA objects and per-product minimum candles
-        for p in self.product_ids:
+        # EMA objects and per-coin minimum candles
+        for p in self.coin_ids:
             se, le, mt = self._get_ema_params(p)
             self.short[p] = EMA(se)
             self.long[p] = EMA(le)
-            self.min_ticks_per_product[p] = mt
+            self.min_ticks_per_coin[p] = mt
 
         # --- Candle-stall watchdog state ---
-        # Last observed *closed* candle time per product (epoch seconds).
-        self._last_candle_close_ts: Dict[str, float] = {p: 0.0 for p in self.product_ids}
+        # Last observed *closed* candle time per coin (epoch seconds).
+        self._last_candle_close_ts: Dict[str, float] = {p: 0.0 for p in self.coin_ids}
         
         # Consider stalled if no close for N * granularity_sec (configurable).
         self._stall_candle_factor = int(getattr(self.cfg, "stall_candle_factor", 3))
@@ -310,8 +320,8 @@ class TradeBot:
         self._stall_hits = 0          # consecutive stalls (resubscribe → reconnect)
         self._stall_total = 0         # lifetime stalls (optional flip-to-local threshold)
         
-        # Skip stall checks for products under timed grace (e.g., after flipping to LOCAL)
-        self._stall_grace_until: Dict[str, float] = {p: 0.0 for p in self.product_ids}
+        # Skip stall checks for coins under timed grace (e.g., after flipping to LOCAL)
+        self._stall_grace_until: Dict[str, float] = {p: 0.0 for p in self.coin_ids}
         self._consecutive_stall_windows = 0
         self._last_stall_action_ts = 0.0
         
@@ -341,6 +351,8 @@ class TradeBot:
         self._last_ping_ts = 0.0
         self._last_subscribe_ts = time.time()
         self._idle_reconnects = 0
+        # Serialize WS reconnect/subscribe paths to avoid racey double actions
+        self._ws_lock = threading.RLock()
         # Telemetry/heartbeat
         self._last_heartbeat_ts = 0.0
         self._last_rest_backstop_poll_ts = 0.0  # throttle REST backstop polling
@@ -349,7 +361,7 @@ class TradeBot:
         # Reconnect backoff bounds (seconds)
         self._ws_backoff_max = int(getattr(self.cfg, "ws_reconnect_backoff_max", 60))
         self._intent = {}  # order_id -> intent metadata (price at signal etc.)
-        self._entry_time = defaultdict(lambda: None)  # per-product entry timestamp when pos goes 0 -> >0
+        self._entry_time = defaultdict(lambda: None)  # per-coin entry timestamp when pos goes 0 -> >0
 
         # Increments (price/base)
         self.price_inc: Dict[str, float] = {}
@@ -366,7 +378,7 @@ class TradeBot:
         self._processed_fills = ProcessedFills(load_json(PROCESSED_FILLS_FILE, {}))
 
         # Clamp/seed AFTER loading portfolio (so we don't get overwritten)
-        for pid in self.product_ids:
+        for pid in self.coin_ids:
             try:
                 live = float(self._get_live_available_base(pid))
             except Exception:
@@ -403,18 +415,18 @@ class TradeBot:
         if body.get("error_response"):
             return False
         # Treat presence of success_response or order_id as success
-        if body.get("success_response") or body.get("order_id"):
+        if body.get("success_response") or body.get("order_id") or body.get("success") is True:
             return True
         # Otherwise, be conservative
         return False
     
     # NOTE: now uses a short TTL cache and graceful fallback on 5xx server errors       
-    def _get_live_available_base(self, product_id: str) -> float:
+    def _get_live_available_base(self, coin_id: str) -> float:
         """
         Prefer Advanced Trade 'trading-available' over generic funding 'available';
         subtract any hold; paginate; pass portfolio_id; optional fallback to local position.
         """
-        base = product_id.split("-")[0]
+        base = coin_id.split("-")[0]
         now = time.time()
         # 1) Serve from cache if fresh
         try:
@@ -451,7 +463,6 @@ class TradeBot:
                         hold_f = float(hold.get("value")) if isinstance(hold, dict) else float(hold or 0.0)
                     except Exception:
                         hold_f = 0.0
-                    return max(0.0, val_f - hold_f)
                     avail_f = max(0.0, val_f - hold_f)
                     # update cache
                     try:
@@ -466,7 +477,7 @@ class TradeBot:
                 if not cursor:
                     break
         except Exception as e:
-            logging.debug("get_accounts failed while reading live available for %s: %s", product_id, e)
+            logging.debug("get_accounts failed while reading live available for %s: %s", coin_id, e)
 
         # 2) Graceful fallback path on errors/5xx: use cached value if present
         try:
@@ -477,15 +488,15 @@ class TradeBot:
             pass
 
         if bool(getattr(self.cfg, "allow_position_fallback_for_avail", False)):
-            return max(0.0, float(self.positions.get(product_id, 0.0)))
+            return max(0.0, float(self.positions.get(coin_id, 0.0)))
         return 0.0
 
-    def _get_ema_params(self, product_id: str) -> Tuple[int, int, int]:
+    def _get_ema_params(self, coin_id: str) -> Tuple[int, int, int]:
         """
-        Returns (short_ema, long_ema, min_ticks_needed) for a given product.
+        Returns (short_ema, long_ema, min_ticks_needed) for a given coin.
 
         - Uses CONFIG.short_ema / CONFIG.long_ema by default.
-        - If CONFIG.ema_params_per_product has an entry for product_id, it can
+        - If CONFIG.ema_params_per_coin has an entry for coin_id, it can
           override with keys: {"short": int, "long": int} or {"short_ema","long_ema"}.
         - min_ticks_needed ensures indicators are warmed up before trading:
           max(long_ema + confirm_candles, CONFIG.min_candles).
@@ -494,10 +505,10 @@ class TradeBot:
         se = int(getattr(self.cfg, "short_ema", 40))
         le = int(getattr(self.cfg, "long_ema", 120))
 
-        # --- per-product override (optional) ---
-        per = getattr(self.cfg, "ema_params_per_product", {})
+        # --- per-coin override (optional) ---
+        per = getattr(self.cfg, "ema_params_per_coin", {})
         if isinstance(per, dict):
-            ov = per.get(product_id) or {}
+            ov = per.get(coin_id) or {}
             if isinstance(ov, dict):
                 se = int(ov.get("short", ov.get("short_ema", se)))
                 le = int(ov.get("long",  ov.get("long_ema",  le)))
@@ -514,31 +525,31 @@ class TradeBot:
 
         return se, le, mt
 
-
     def _prime_increments(self):
-        for pid in self.product_ids:
+        for pid in self.coin_ids:
             try:
+                # Coinbase Advanced Trade: get_product(product_id=...)
                 prod = self.rest.get_product(product_id=pid)
-                body = getattr(prod, "to_dict", lambda: {})()
-                price_inc = body.get("price_increment") or body.get("quote_increment") or "0.01"
+                body = getattr(prod, "to_dict", lambda: {})() or {}
+                # Prefer canonical AT fields; keep older fallbacks for safety
+                price_inc = body.get("quote_increment") or body.get("price_increment") or "0.01"
                 base_inc  = body.get("base_increment")  or body.get("base_min_size")   or "0.00000001"
                 self.price_inc[pid] = float(price_inc)
-                self.base_inc[pid] = float(base_inc)
+                self.base_inc[pid]  = float(base_inc)
                 min_mkt = (
                     body.get("min_market_base_size")
                     or body.get("min_market_order_size")
                     or body.get("base_min_market_size")
                     or 0.0
                 )
-                try:
-                    self.min_market_base_size[pid] = float(min_mkt)
-                except Exception:
-                    self.min_market_base_size[pid] = 0.0
+                self.min_market_base_size[pid] = float(min_mkt or 0.0)
+                #logging.info("Increments for %s: price_inc=%g, base_inc=%g, min_market_base_size=%g",pid, self.price_inc[pid], self.base_inc[pid], self.min_market_base_size[pid])
             except Exception:
                 self.price_inc[pid] = 0.01
                 self.base_inc[pid] = 1e-8
                 self.min_market_base_size[pid] = 0.0
-
+                logging.warning("Increments fallback in use for %s (check get_product).", pid)
+                
     # -------------------- persistence --------------------
     def _load_portfolio(self):
         data = load_json(PORTFOLIO_FILE, {"positions": {}, "cost_basis": {}, "realized_pnl": 0.0, "entry_time": {}})
@@ -581,13 +592,27 @@ class TradeBot:
     def _backfill_seed_indicators(self):
         lookback = int(getattr(self.cfg, "warmup_candles", 200))
         enum = _granularity_enum(self.granularity_sec)
-        end_ts = int(time.time())
-        start_ts = end_ts - (lookback + 5) * self.granularity_sec
-        for pid in self.product_ids:
+        gsec = int(self.granularity_sec)
+        # strictly-past, bucket-aligned window; Coinbase caps around 300 candles
+        now = int(time.time())
+        end_ts = _align_to_bucket(now - 1, gsec)                 # never future
+        want = min(max(lookback, 1), 300)
+        start_ts = end_ts - (want + 5) * gsec                    # a few extra just in case
+
+        for pid in self.coin_ids:
             try:
-                resp = self.rest.get_candles(product_id=pid, start=str(start_ts), end=str(end_ts), granularity=enum)
-                body = getattr(resp, "to_dict", lambda: resp)()
-                arr = list(body.get("candles", []))
+                # Advanced Trade requires UNIX second timestamps + enum granularity
+                p = dict(
+                    product_id=pid,
+                    start=int(start_ts),   # send as UNIX seconds (int)
+                    end=int(end_ts),       
+                    granularity=enum,
+                )
+                logging.debug("Backfill params(unix/enum): %s", p)
+                resp = self.rest.get_candles(**p)
+
+                body = getattr(resp, "to_dict", lambda: resp)() or {}
+                arr = list(body.get("candles", []) or [])
                 arr.sort(key=lambda c: int(c.get("start", 0)))
                 for c in arr:
                     close = float(c.get("close"))
@@ -643,18 +668,26 @@ class TradeBot:
             self._last_rest_backstop_poll_ts = now
 
             enum = _granularity_enum(self.granularity_sec)
+            gsec = int(self.granularity_sec)
             warm = int(getattr(self.cfg, "rest_backstop_warmup", 2))
-            end_ts = int(now)
-            start_ts = end_ts - (warm + 3) * self.granularity_sec
+            # strictly-past, bucket-aligned tiny window (fetch a few last-closed buckets)
+            end_ts = _align_to_bucket(int(now) - 1, gsec)          # last CLOSED bucket start
+            start_ts = end_ts - (max(1, warm) + 3) * gsec          # small window
+            if start_ts >= end_ts:
+                start_ts = end_ts - 2 * gsec
 
-            for pid in self.product_ids:
+            for pid in self.coin_ids:
                 try:
-                    resp = self.rest.get_candles(
+                    # Use UNIX seconds + enum granularity (no numeric fallback)
+                    p = dict(
                         product_id=pid,
-                        start=str(start_ts),
-                        end=str(end_ts),
+                        start=int(start_ts),   # UNIX seconds (int)
+                        end=int(end_ts),
                         granularity=enum,
                     )
+                    logging.debug("Backstop params(unix/enum): %s", p)
+                    resp = self.rest.get_candles(**p)
+
                     body = getattr(resp, "to_dict", lambda: resp)() or {}
                     arr = list(body.get("candles", []) or [])
                     if not arr:
@@ -678,38 +711,47 @@ class TradeBot:
                     # Nudge candle-stall watchdog
                     self._last_candle_close_ts[pid] = time.time()
                 except Exception as _e:
-                    logging.debug("REST backstop poll failed for %s: %s", pid, _e)
+                    try:
+                        logging.error("REST backstop 400/err for %s with params start=%s end=%s gran=%s : %s",
+                                      pid, start_ts, end_ts, enum, _e)
+                    except Exception:
+                        pass
         except Exception as e:
             logging.debug("REST backstop tick error: %s", e)
 
     def _subscribe_all(self):
         """Subscribe ticker always; optionally WS candles; best-effort heartbeats."""
-        # Always keep ticker for quotes/maker logic
-        try:
-            self.ws.ticker(product_ids=self.product_ids)
-        except TypeError:
-            self.ws.ticker(self.product_ids)
-        # Candles if requested via WS; otherwise we will locally aggregate from ticker
-        if self.candle_mode == "ws":
+        with self._ws_lock:
+            # Always keep ticker for quotes/maker logic
             try:
-                enum = _granularity_enum(self.granularity_sec)
+                self.ws.ticker(product_ids=self.coin_ids)
+            except TypeError:
+                self.ws.ticker(self.coin_ids)
+            # Candles if requested via WS; otherwise we will locally aggregate from ticker
+            if self.candle_mode == "ws":
                 try:
-                    self.ws.candles(product_ids=self.product_ids, granularity=enum)
-                except TypeError:
-                    self.ws.candles(product_ids=self.product_ids)
-                logging.info("Subscribed to WS candles (%ds) and ticker for %s", self.granularity_sec, ", ".join(self.product_ids))
+                    enum = _granularity_enum(self.granularity_sec)
+                    # Try (kwargs), then (positional with kwargs), then (positional only)
+                    try:
+                        self.ws.candles(product_ids=self.coin_ids, granularity=enum)
+                    except TypeError:
+                        try:
+                            self.ws.candles(self.coin_ids, granularity=enum)
+                        except TypeError:
+                            self.ws.candles(self.coin_ids)
+                    logging.info("Subscribed to WS candles (%ds) and ticker for %s",
+                                 self.granularity_sec, ", ".join(self.coin_ids))
+                except Exception:
+                    logging.info("WS candles unavailable; falling back to LOCAL aggregation.")
+                    self.candle_mode = "local"
+                    # Give builders time to produce the first local close
+                    self._set_local_mode_grace(buckets=1.2)
+            try:
+                self.ws.heartbeats()
             except Exception:
-                logging.info("WS candles unavailable; falling back to local aggregation.")
-                self.candle_mode = "local"
-                # Give builders time to produce the first local close
-                self._set_local_mode_grace(buckets=1.2)
-                
-        try:
-            self.ws.heartbeats()
-        except Exception:
-            logging.debug("Heartbeats channel not available; continuing without it.")
-        logging.info("Websocket subscriptions ready.")
-        self._last_subscribe_ts = time.time()
+                logging.debug("Heartbeats channel not available; continuing without it.")
+            logging.info("Websocket subscriptions ready.")
+            self._last_subscribe_ts = time.time()
 
     def open(self):
         self.ws.open()
@@ -738,20 +780,21 @@ class TradeBot:
                 self._idle_reconnects += 1
         except Exception:
             pass
-        try:
-            self.ws.close()
-        except Exception:
-            pass
-        time.sleep(1.0)
-        try:
-            self.ws.open()
-            self._subscribe_all()
-            self._last_msg_ts = time.time()
-            self._last_ping_ts = 0.0          # allow immediate ping
-            self._last_subscribe_ts = time.time()  # belt-and-suspenders (also set in _subscribe_all)
-            logging.warning("WS reconnected (%s).", reason)
-        except Exception as e:
-            logging.error("WS reconnect failed (%s): %s", reason, e)
+        with self._ws_lock:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
+            time.sleep(1.0)
+            try:
+                self.ws.open()
+                self._subscribe_all()
+                self._last_msg_ts = time.time()
+                self._last_ping_ts = 0.0          # allow immediate ping
+                self._last_subscribe_ts = time.time()  # belt-and-suspenders
+                logging.warning("WS reconnected (%s).", reason)
+            except Exception as e:
+                logging.error("WS reconnect failed (%s): %s", reason, e)
 
     def _maybe_warn_and_recover_idle(self, now_ts: float | None = None):
         if now_ts is None:
@@ -759,10 +802,13 @@ class TradeBot:
         idle = now_ts - float(self._last_msg_ts or 0.0)
         warn_s = int(getattr(self.cfg, "ws_idle_warn_s", 45))
         rc_s  = int(getattr(self.cfg, "ws_idle_reconnect_s", 120))
-        if idle >= warn_s and idle < rc_s:
-            # throttle WARNs to once per minute
-            if int(idle) % 60 == 0:
+        if warn_s <= idle < rc_s:
+            # throttle WARNs to once per minute (and once per minute-mark)
+            last_mark = getattr(self, "_last_idle_warn_mark", None)
+            this_mark = int(idle) // 60
+            if this_mark != last_mark:
                 logging.warning("WS idle for %ds (no messages).", int(idle))
+                self._last_idle_warn_mark = this_mark
         if idle >= rc_s:
             self._force_reconnect(f"idle {int(idle)}s")
             # optional: repeated trouble → flip to local candles
@@ -834,15 +880,15 @@ class TradeBot:
                             stalled.append(pid)
                      
                     if stalled:
-                        # If the majority of products are stalled, prefer local aggregation immediately.
+                        # If the majority of coins are stalled, prefer local aggregation immediately.
                         try:
-                            pct = len(stalled) / max(1, len(self.product_ids))
+                            pct = len(stalled) / max(1, len(self.coin_ids))
                         except Exception:
                             pct = 0.0
                         majority_thresh = float(getattr(self.cfg, "stall_majority_flip_threshold", 0.6))
                         if self.candle_mode == "ws" and pct >= majority_thresh:
                             logging.warning(
-                                "Majority of products stalled (%.0f%%). Switching candle mode to LOCAL aggregation.",
+                                "Majority of coins stalled (%.0f%%). Switching candle mode to LOCAL aggregation.",
                                 pct * 100.0
                             )
                             self.candle_mode = "local"
@@ -919,7 +965,7 @@ class TradeBot:
             pass
 
     # -------------------- kpi csv --------------------
-    def _append_trade_csv(self, *, ts_iso: str, order_id: str | None, side: str, product_id: str,
+    def _append_trade_csv(self, *, ts_iso: str, order_id: str | None, side: str, coin_id: str,
                           size: float, price: float, fee: float | None,
                           liquidity: str | None, pnl: float | None,
                           position_after: float | None, cost_basis_after: float | None,
@@ -930,7 +976,7 @@ class TradeBot:
         except Exception:
             return
         headers = [
-            "ts","order_id","side","product","size","price","quote_usd","fee","liquidity",
+            "ts","order_id","side","coin","size","price","quote_usd","fee","liquidity",
             "pnl","position_after","cost_basis_after","intent_price","slippage_abs","slippage_bps",
             "hold_time_sec","entry_reason","exit_reason"
         ]
@@ -942,11 +988,11 @@ class TradeBot:
             s_up = (side or "").upper()
             if s_up == "BUY" and not entry_reason:
                 logging.debug("CSV: missing entry_reason for BUY %s (order_id=%s); defaulting to ema_cross.",
-                              product_id, order_id)
+                              coin_id, order_id)
                 entry_reason = "ema_cross"
             elif s_up == "SELL" and not exit_reason:
                 # Keep blank (various SELL reasons) but note for debugging
-                logging.debug("CSV: missing exit_reason for SELL %s (order_id=%s).", product_id, order_id)
+                logging.debug("CSV: missing exit_reason for SELL %s (order_id=%s).", coin_id, order_id)
         except Exception:
             pass
         
@@ -963,7 +1009,7 @@ class TradeBot:
                     slippage_bps = (slippage_abs / intent_price) * 10_000.0
         except Exception:
             pass
-        row = [ts_iso, order_id or "", side, product_id, f"{size:.10f}" if size is not None else "",
+        row = [ts_iso, order_id or "", side, coin_id, f"{size:.10f}" if size is not None else "",
                f"{price:.8f}" if price is not None else "", f"{quote_usd:.2f}" if quote_usd is not None else "",
                f"{fee:.6f}" if fee is not None else "", liquidity or "",
                f"{pnl:.8f}" if pnl is not None else "",
@@ -1023,7 +1069,7 @@ class TradeBot:
                     # local candle aggregation
                     if self.candle_mode == "local":
                         closed = self._builders[pid].update(p, ts_now)
-                        # If this is the first tick starting a fresh local candle, seed a per-product grace
+                        # If this is the first tick starting a fresh local candle, seed a per-coin grace
                         if self._builders[pid].start is not None:
                             # Only seed when grace is not already active
                             if time.time() >= float(self._stall_grace_until.get(pid, 0.0)):
@@ -1084,20 +1130,20 @@ class TradeBot:
                     stall_s = int(self._stall_candle_factor) * int(self.granularity_sec)
                     stalled = []
                     for pid, last_ts in self._last_candle_close_ts.items():
-                        # Skip if product is in grace (e.g., right after switching to LOCAL)
+                        # Skip if coin is in grace (e.g., right after switching to LOCAL)
                         if now < float(self._stall_grace_until.get(pid, 0.0)):
                             continue
                         if last_ts and (now - float(last_ts)) >= stall_s:
                             stalled.append(pid)
                     if stalled:
                         try:
-                            pct = len(stalled) / max(1, len(self.product_ids))
+                            pct = len(stalled) / max(1, len(self.coin_ids))
                         except Exception:
                             pct = 0.0
                         majority_thresh = float(getattr(self.cfg, "stall_majority_flip_threshold", 0.6))
                         if self.candle_mode == "ws" and pct >= majority_thresh:
                             logging.warning(
-                                "Majority of products stalled (%.0f%%). Switching candle mode to LOCAL aggregation.",
+                                "Majority of coins stalled (%.0f%%). Switching candle mode to LOCAL aggregation.",
                                 pct * 100.0
                             )
                             self.candle_mode = "local"
@@ -1148,7 +1194,7 @@ class TradeBot:
 
 
     # -------------------- signal & orders --------------------
-    def evaluate_signal(self, product_id: str, price: float, s: float, l: float):
+    def evaluate_signal(self, coin_id: str, price: float, s: float, l: float):
         if self.stop_requested:
             return
 
@@ -1162,30 +1208,30 @@ class TradeBot:
             rel = 0
 
         # First determination: prime trend without trading
-        if product_id not in self._primed:
-            self._trend[product_id] = rel
-            self._primed.add(product_id)
+        if coin_id not in self._primed:
+            self._trend[coin_id] = rel
+            self._primed.add(coin_id)
             return
 
-        prev = self._trend[product_id]
+        prev = self._trend[coin_id]
 
         # Confirmation logic
         if rel == 0:
             # LOCAL-ONLY: allow one neutral (band) candle to preserve confirmations
-            st = self._pending.get(product_id, {"rel": 0, "count": 0, "band_grace": 0})
+            st = self._pending.get(coin_id, {"rel": 0, "count": 0, "band_grace": 0})
             local_mode = (self.candle_mode == "local")
             if local_mode and st.get("rel", 0) != 0 and int(st.get("band_grace", 0)) == 0:
                 # First neutral after a directional run → keep count, mark grace used
                 st["band_grace"] = 1
-                self._pending[product_id] = st
+                self._pending[coin_id] = st
             else:
                 # Multiple neutrals or not in a run → reset as before
-                self._pending[product_id] = {"rel": 0, "count": 0, "band_grace": 0}
+                self._pending[coin_id] = {"rel": 0, "count": 0, "band_grace": 0}
             return
 
-        st = self._pending.get(product_id, {"rel": 0, "count": 0, "band_grace": 0})
+        st = self._pending.get(coin_id, {"rel": 0, "count": 0, "band_grace": 0})
         if not st or st["rel"] != rel:
-            # new direction or first time seeing this product this session
+            # new direction or first time seeing this coin this session
             st = {"rel": rel, "count": 1, "band_grace": 0}
         else:
             st["count"] += 1
@@ -1193,7 +1239,7 @@ class TradeBot:
 
         # optional cap to keep count bounded in long trends
         st["count"] = min(st["count"], 32)
-        self._pending[product_id] = st
+        self._pending[coin_id] = st
 
         # dynamic confirms — read live cfg so mid-run AutoTune applies
         need = max(1, int(getattr(self.cfg, "confirm_candles",
@@ -1203,14 +1249,14 @@ class TradeBot:
             return
 
         # confirmed cross; reset pending
-        self._pending[product_id] = {"rel": 0, "count": 0, "band_grace": 0}
+        self._pending[coin_id] = {"rel": 0, "count": 0, "band_grace": 0}
         if rel == prev:
             return
-        self._trend[product_id] = rel
+        self._trend[coin_id] = rel
         signal = rel  # +1 buy, -1 sell
 
-        cooldown_s = int(getattr(self.cfg, "per_product_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
-        if not self.last.ok(product_id, cooldown_s):
+        cooldown_s = int(getattr(self.cfg, "per_coin_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
+        if not self.last.ok(coin_id, cooldown_s):
             return
 
         # --- v1.0.3: Just-in-time reconcile before SELL position check ---
@@ -1218,17 +1264,17 @@ class TradeBot:
             try:
                 self.reconcile_now(hours=getattr(self.cfg, "lookback_hours", 48))
             except Exception as e:
-                logging.debug("Pre-SELL reconcile failed for %s: %s", product_id, e)
+                logging.debug("Pre-SELL reconcile failed for %s: %s", coin_id, e)
 
         # SELL guardrails: must hold position
         if signal < 0:
             try:
-                live_avail = float(self._get_live_available_base(product_id))
+                live_avail = float(self._get_live_available_base(coin_id))
             except Exception:
                 live_avail = 0.0
-            if max(float(self.positions.get(product_id, 0.0)), live_avail) <= 0.0:
+            if max(float(self.positions.get(coin_id, 0.0)), live_avail) <= 0.0:
                 logging.info("Skip SELL %s: no position held (cache=%.10f live=%.10f).",
-                     product_id, float(self.positions.get(product_id, 0.0)), live_avail)
+                     coin_id, float(self.positions.get(coin_id, 0.0)), live_avail)
                 return
 
 
@@ -1236,14 +1282,14 @@ class TradeBot:
         if signal < 0:
             hs = getattr(self.cfg, "hard_stop_bps", None)
             if hs is not None:
-                cb = float(self.cost_basis.get(product_id, 0.0) or 0.0)
+                cb = float(self.cost_basis.get(coin_id, 0.0) or 0.0)
                 if cb > 0.0:
                     floor = cb * (1.0 - float(hs) / 10_000.0)
                     if price <= floor:
                         # Always cross-check with live-available before SELL sizing
-                        held_cache = max(0.0, float(self.positions.get(product_id, 0.0)))
+                        held_cache = max(0.0, float(self.positions.get(coin_id, 0.0)))
                         try:
-                            live_avail = float(self._get_live_available_base(product_id))
+                            live_avail = float(self._get_live_available_base(coin_id))
                         except Exception:
                             live_avail = -1.0
                         held = held_cache
@@ -1251,30 +1297,30 @@ class TradeBot:
                             held = min(held_cache, live_avail)
                             # If cache was empty but live shows balance, seed cache for later logic
                             if held_cache <= 0.0 and live_avail > 0.0:
-                                self.positions[product_id] = live_avail
+                                self.positions[coin_id] = live_avail
                         
                         if held > 0.0 and price > 0.0:
                             quote_usd = held * price
                             logging.info(
                                 "[HARD STOP TRIGGER] Will attempt MARKET SELL %s after availability checks: "
                                 "last=%.8f floor=%.8f held=%.10f quote~$%.2f",
-                                product_id, price, floor, held, quote_usd
+                                coin_id, price, floor, held, quote_usd
                             )
                             # Route through place_order so 'reason' is captured in _intent → trades.csv
                             self.place_order(
-                                product_id, side="SELL", quote_usd=quote_usd, last_price=price, reason="stop_loss"
+                                coin_id, side="SELL", quote_usd=quote_usd, last_price=price, reason="stop_loss"
                             )
                         return
 
         # Advisors (optional): veto only if clearly bad
         if self.enable_advisors:
-            rsi_val = self._rsi[product_id].value
-            macd_hist = self._macd[product_id].hist
+            rsi_val = self._rsi[coin_id].value
+            macd_hist = self._macd[coin_id].hist
             if not advisor_allows("BUY" if signal > 0 else "SELL", rsi_val, macd_hist, self.advisor_settings, price):
                 logging.info(
                     "Advisor veto %s %s (RSI=%s, MACD_hist=%s)",
                     "BUY" if signal > 0 else "SELL",
-                    product_id,
+                    coin_id,
                     f"{rsi_val:.2f}" if rsi_val is not None else "n/a",
                     f"{macd_hist:.5f}" if macd_hist is not None else "n/a",
                 )
@@ -1299,20 +1345,20 @@ class TradeBot:
 
         try:
             # EMA captain path — tag reason explicitly
-            self.place_order(product_id, side=side, quote_usd=notional, last_price=price, reason="ema_cross")
+            self.place_order(coin_id, side=side, quote_usd=notional, last_price=price, reason="ema_cross")
         except Exception as e:
-            logging.exception("Order error for %s: %s", product_id, e)
+            logging.exception("Order error for %s: %s", coin_id, e)
 
-    def _submit_limit_maker_order(self, product_id: str, side: str, base_size: float, limit_price: float):
-        client_order_id = f"ema-{product_id}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-        p_dec = decimals_from_inc(self.price_inc.get(product_id, 0.01))
-        b_dec = decimals_from_inc(self.base_inc.get(product_id, 1e-8))
+    def _submit_limit_maker_order(self, coin_id: str, side: str, base_size: float, limit_price: float):
+        client_order_id = f"ema-{coin_id}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        p_dec = decimals_from_inc(self.price_inc.get(coin_id, 0.01))
+        b_dec = decimals_from_inc(self.base_inc.get(coin_id, 1e-8))
         limit_price_str = f"{limit_price:.{p_dec}f}"
         base_size_str = f"{base_size:.{b_dec}f}"
 
         params = {
             "client_order_id": client_order_id,
-            "product_id": product_id,
+            "product_id": coin_id,
             "limit_price": limit_price_str,
             "base_size": base_size_str,
             "post_only": True,
@@ -1329,9 +1375,9 @@ class TradeBot:
         except Exception as e:
             return False, e
 
-    def _submit_market_order(self, product_id: str, side: str, quote_usd: float):
-        client_order_id = f"ema-{product_id}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-        params = {"client_order_id": client_order_id, "product_id": product_id}
+    def _submit_market_order(self, coin_id: str, side: str, quote_usd: float):
+        client_order_id = f"ema-{coin_id}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+        params = {"client_order_id": client_order_id, "product_id": coin_id}
         if self.portfolio_id:
             params["portfolio_id"] = self.portfolio_id
         try:
@@ -1340,29 +1386,29 @@ class TradeBot:
                 resp = self.rest.market_order_buy(**params)
             else:
                 # SELL: use base_size and clamp to live-available position
-                held = max(0.0, float(self.positions.get(product_id, 0.0)))
-                live_avail = self._get_live_available_base(product_id)
+                held = max(0.0, float(self.positions.get(coin_id, 0.0)))
+                live_avail = self._get_live_available_base(coin_id)
                 held = min(held, live_avail)
 
                 try:
-                    min_base = float(self.base_inc.get(product_id, 1e-8))
+                    min_base = float(self.base_inc.get(coin_id, 1e-8))
                 except Exception:
                     min_base = 1e-8
                 if held < (min_base * 0.99):
                     logging.info(
                         "Skip SELL %s: no live-available base (held=%.10f, avail=%.10f, inc=%g).",
-                        product_id,
-                        float(self.positions.get(product_id, 0.0)),
+                        coin_id,
+                        float(self.positions.get(coin_id, 0.0)),
                         float(live_avail),
-                        float(self.base_inc.get(product_id, 1e-8)),
+                        float(self.base_inc.get(coin_id, 1e-8)),
                     )
                     return False, ValueError("No live-available base to sell")
 
-                last = float(self.quotes.get(product_id, {}).get("last") or 0.0)
+                last = float(self.quotes.get(coin_id, {}).get("last") or 0.0)
                 intended_base = quote_usd / last if last > 0 else held
                 base_size = min(held, intended_base)
                 try:
-                    base_inc = float(self.base_inc.get(product_id, 1e-8))
+                    base_inc = float(self.base_inc.get(coin_id, 1e-8))
                 except Exception:
                     base_inc = 1e-8
                 
@@ -1382,7 +1428,7 @@ class TradeBot:
                 ):
                     before = base_size
                     self._swab_log(
-                        f"Applying full-exit shave for {product_id}: intended={before:.10f}, "
+                        f"Applying full-exit shave for {coin_id}: intended={before:.10f}, "
                         f"held={held:.10f}, inc={base_inc}, steps={shave_steps}…"
                     )
                     base_size = max(base_inc, held - shave_steps * base_inc)
@@ -1394,30 +1440,30 @@ class TradeBot:
                 if base_size < inc_for_log - 1e-18:
                     logging.info(
                         "Skip SELL %s: base_size below increment %s(held=%.10f, inc=%s).",
-                        product_id,
+                        coin_id,
                         "after shave " if shaved else "after rounding ",
                         float(held), str(inc_for_log),
                     )
                     # mark dust suppression to avoid repeated attempts
                     try:
-                        self._qm_dust_suppress_until[product_id] = time.time() + 30 * 60
+                        self._qm_dust_suppress_until[coin_id] = time.time() + 30 * 60
                     except Exception:
                         pass
                     return False, ValueError("No base size to sell")
                     
                 # Enforce min market base size if required
-                min_mkt = float(self.min_market_base_size.get(product_id, 0.0) or 0.0)
+                min_mkt = float(self.min_market_base_size.get(coin_id, 0.0) or 0.0)
                 if min_mkt > 0.0 and base_size < min_mkt:
                     if held >= min_mkt:
                         base_size = round_down_to_inc(min(held, max(base_size, min_mkt)), inc_for_log)
                     else:
                         logging.info(
                             "Skip SELL %s: below min_market_base_size (base_size=%.10f < %.10f, held=%.10f).",
-                            product_id, base_size, min_mkt, held
+                            coin_id, base_size, min_mkt, held
                         )
                         # mark dust suppression to avoid repeated attempts
                         try:
-                            self._qm_dust_suppress_until[product_id] = time.time() + 30 * 60
+                            self._qm_dust_suppress_until[coin_id] = time.time() + 30 * 60
                         except Exception:
                             pass
                         return False, ValueError("Below min_market_base_size")
@@ -1433,8 +1479,8 @@ class TradeBot:
                 body = getattr(resp, "to_dict", lambda: resp)() or {}
                 if body and (not body.get("success", True)):
                     err = (body.get("error_response") or {}).get("error") or ""
-                    if "INSUFFICIENT_FUND" in str(err).upper():
-                        self._qm_last_ts[product_id] = time.time()
+                    if "INSUFFICIENT" in str(err).upper():
+                        self._qm_last_ts[coin_id] = time.time()
                         ok = False
             except Exception:
                 pass
@@ -1445,14 +1491,14 @@ class TradeBot:
             return False, e
 
 
-    def place_order(self, product_id: str, side: str, quote_usd: float, last_price: float, reason: str = "ema_cross"):
-        logging.info("[INTENT] %s %s $%.2f (last=%.8f, reason=%s)", side.upper(), product_id, float(quote_usd or 0.0), float(last_price or 0.0), reason)
+    def place_order(self, coin_id: str, side: str, quote_usd: float, last_price: float, reason: str = "ema_cross"):
+        logging.info("[INTENT] %s %s $%.2f (last=%.8f, reason=%s)", side.upper(), coin_id, float(quote_usd or 0.0), float(last_price or 0.0), reason)
         side = side.upper()
         assert side in {"BUY", "SELL"}
 
         display_qty = quote_usd / last_price if last_price > 0 else 0.0
         dry_run = bool(getattr(self.cfg, "dry_run", False))
-        log_trade(product_id, side, quote_usd, last_price, display_qty, dry_run)
+        log_trade(coin_id, side, quote_usd, last_price, display_qty, dry_run)
 
         if dry_run:
             if side == "BUY":
@@ -1460,8 +1506,8 @@ class TradeBot:
                 self.spend.add(quote_usd)  # BUY-only
             else:
                 self.session_cash_pnl += quote_usd
-            self.last.stamp(product_id)
-            logging.info("[DRY RUN] %s %s $%.2f (reason=%s)", side, product_id, quote_usd, reason)
+            self.last.stamp(coin_id)
+            logging.info("[DRY RUN] %s %s $%.2f (reason=%s)", side, coin_id, quote_usd, reason)
             return
 
         # Side-aware maker preference
@@ -1473,36 +1519,36 @@ class TradeBot:
         forced_market = (side == "SELL" and reason in ("take_profit", "stagnation", "stop_loss"))
         if forced_market:
             prefer_maker = False
-            logging.info("[ATTEMPT] MARKET SELL for %s due to reason=%s", product_id, reason)
+            logging.info("[ATTEMPT] MARKET SELL for %s due to reason=%s", coin_id, reason)
 
         if prefer_maker:
-            q = self.quotes.get(product_id, {})
+            q = self.quotes.get(coin_id, {})
             limit_price, base_size = compute_maker_limit(
-                product_id=product_id,
+                coin_id=coin_id,
                 side=side,
                 last_price=last_price,
-                price_inc=self.price_inc.get(product_id, 0.01),
-                base_inc=self.base_inc.get(product_id, 1e-8),
+                price_inc=self.price_inc.get(coin_id, 0.01),
+                base_inc=self.base_inc.get(coin_id, 1e-8),
                 usd_per_order=float(getattr(self.cfg, "usd_per_order", 1.0)),
-                offset_bps=getattr(self.cfg, "maker_offset_bps_per_product", {}).get(
-                    product_id, float(getattr(self.cfg, "maker_offset_bps", 5.0))
+                offset_bps=getattr(self.cfg, "maker_offset_bps_per_coin", {}).get(
+                    coin_id, float(getattr(self.cfg, "maker_offset_bps", 5.0))
                 ),
                 bid=q.get("bid"),
                 ask=q.get("ask"),
             )
             if side == "SELL":
                 # clamp maker SELL size to live available (avoids reserve/lock issues)
-                held = max(0.0, float(self.positions.get(product_id, 0.0)))
+                held = max(0.0, float(self.positions.get(coin_id, 0.0)))
                 try:
-                    live_avail = float(self._get_live_available_base(product_id))
+                    live_avail = float(self._get_live_available_base(coin_id))
                 except Exception:
                     live_avail = held
                 base_size = min(base_size, held, live_avail)
                 try:
-                    base_inc = float(self.base_inc.get(product_id, 1e-8))
+                    base_inc = float(self.base_inc.get(coin_id, 1e-8))
                 except Exception:
                     base_inc = 1e-8
-                min_mkt = float(self.min_market_base_size.get(product_id, 0.0) or 0.0)
+                min_mkt = float(self.min_market_base_size.get(coin_id, 0.0) or 0.0)
                 # Round down to increment
                 base_size = round_down_to_inc(max(0.0, base_size), base_inc)
                 # Enforce min market base size if defined
@@ -1512,52 +1558,57 @@ class TradeBot:
                     else:
                         logging.info(
                             "Skip maker SELL %s: below min_market_base_size (base_size=%.10f < %.10f, held=%.10f).",
-                            product_id, base_size, min_mkt, held
+                            coin_id, base_size, min_mkt, held
                         )
+                        # mark dust suppression to avoid repeated attempts for a short window
+                        try:
+                            self._qm_dust_suppress_until[coin_id] = time.time() + 30 * 60
+                        except Exception:
+                            pass
                         return
 
             if base_size <= 0 or limit_price <= 0:
-                logging.error("Invalid maker params for %s %s: price=%.8f size=%.8f", side, product_id, limit_price, base_size)
+                logging.error("Invalid maker params for %s %s: price=%.8f size=%.8f", side, coin_id, limit_price, base_size)
                 return
-            ok, resp = self._submit_limit_maker_order(product_id, side, base_size, limit_price)
+            ok, resp = self._submit_limit_maker_order(coin_id, side, base_size, limit_price)
         else:
-            ok, resp = self._submit_market_order(product_id, side, quote_usd)
+            ok, resp = self._submit_market_order(coin_id, side, quote_usd)
 
         if not ok:
             # If this was a forced market exit, be explicit that execution failed.
             if 'forced_market' in locals() and forced_market:
-                logging.warning("[FAILED] MARKET SELL for %s (reason=%s) did not execute.", product_id, reason)
-            logging.error("%s order FAILED for %s $%.2f: %s", side, product_id, quote_usd, resp)
+                logging.warning("[FAILED] MARKET SELL for %s (reason=%s) did not execute.", coin_id, reason)
+            logging.error("%s order FAILED for %s $%.2f: %s", side, coin_id, quote_usd, resp)
             return
 
         # BUY-only daily spend
         if side == "BUY":
             self.spend.add(quote_usd)
-        self.last.stamp(product_id)
+        self.last.stamp(coin_id)
 
         # Success logging — only claim EXECUTED for forced-market sells after success
         try:
             body = getattr(resp, "to_dict", lambda: resp)()
             if side == "SELL":
-                held_dbg = float(self.positions.get(product_id, 0.0))
+                held_dbg = float(self.positions.get(coin_id, 0.0))
                 try:
-                    avail_dbg = float(self._get_live_available_base(product_id))
+                    avail_dbg = float(self._get_live_available_base(coin_id))
                 except Exception:
                     avail_dbg = -1.0
-                base_inc_dbg = float(self.base_inc.get(product_id, 1e-8))
+                base_inc_dbg = float(self.base_inc.get(coin_id, 1e-8))
                 logging.info(
                     "Live SELL %s $%.2f placed. held=%.10f avail=%.10f base_inc=%g Resp: %s (reason=%s)",
-                    product_id, quote_usd, held_dbg, avail_dbg, base_inc_dbg, body, reason
+                    coin_id, quote_usd, held_dbg, avail_dbg, base_inc_dbg, body, reason
                 )
                 if 'forced_market' in locals() and forced_market:
-                    logging.info("[EXECUTED] MARKET SELL %s (reason=%s)", product_id, reason)
+                    logging.info("[EXECUTED] MARKET SELL %s (reason=%s)", coin_id, reason)
             else:
-                logging.info("Live BUY %s $%.2f placed. Resp: %s (reason=%s)", product_id, quote_usd, body, reason)
+                logging.info("Live BUY %s $%.2f placed. Resp: %s (reason=%s)", coin_id, quote_usd, body, reason)
         except Exception:
             if side == "SELL":
-                logging.info("Live SELL %s $%.2f placed. (reason=%s)", product_id, quote_usd, reason)
+                logging.info("Live SELL %s $%.2f placed. (reason=%s)", coin_id, quote_usd, reason)
             else:
-                logging.info("Live BUY %s $%.2f placed. (reason=%s)", product_id, quote_usd, reason)
+                logging.info("Live BUY %s $%.2f placed. (reason=%s)", coin_id, quote_usd, reason)
         
         # best-effort immediate fills -> update portfolio
         try:
@@ -1566,10 +1617,10 @@ class TradeBot:
 
             # record intent snapshot for slippage/KPIs
             try:
-                q = self.quotes.get(product_id, {})
+                q = self.quotes.get(coin_id, {})
                 self._intent[str(order_id)] = {
                     "ts": datetime.now(timezone.utc).isoformat(),
-                    "product_id": product_id,
+                    "product_id": coin_id,
                     "side": side,
                     "intent_price": float(last_price) if last_price else None,
                     "bid": q.get("bid"),
@@ -1607,12 +1658,19 @@ class TradeBot:
                         size_f = float(f.get("size") or f.get("base_size") or f.get("filled_size") or 0.0)
                         price_f = float(f.get("price") or 0.0)
                         fee_f = float(f.get("fee") or 0.0)
+                        # Snapshots (before mutation) for precise CSV on SELLs
+                        qty_before_snapshot = float(self.positions.get(pid_f, 0.0))
+                        cb_before_snapshot  = float(self.cost_basis.get(pid_f, 0.0))
                         if side_f == "BUY":
-                            new_qty = self.positions[pid_f] + size_f
+                            qty_before = self.positions[pid_f]
+                            new_qty = qty_before + size_f
                             new_cost = self.cost_basis[pid_f] * self.positions[pid_f] + (size_f * price_f) + fee_f
                             if new_qty > 0:
                                 self.positions[pid_f] = new_qty
                                 self.cost_basis[pid_f] = new_cost / new_qty
+                            # mark entry time when position transitions flat -> long
+                            if qty_before <= 0.0 and new_qty > 0.0:
+                                self._entry_time[pid_f] = time.time()
                         elif side_f == "SELL":
                             qty_before = self.positions[pid_f]
                             sell_qty = min(size_f, qty_before)
@@ -1642,22 +1700,19 @@ class TradeBot:
                             pnl_fill = None
                             if side_f == "SELL":
                                 try:
-                                    sell_qty = min(size_f, self.positions.get(pid_f, 0.0) + size_f)
-                                    pnl_fill = sell_qty * (price_f - self.cost_basis[pid_f]) - fee_f
+                                    sell_qty_csv = min(size_f, qty_before_snapshot)
+                                    pnl_fill = sell_qty_csv * (price_f - cb_before_snapshot) - fee_f
                                 except Exception:
                                     pnl_fill = None
                             hold_time_sec = None
                             try:
-                                if side_f == "BUY":
-                                    if (self.positions[pid_f] - size_f) <= 0 and self.positions[pid_f] > 0:
-                                        self._entry_time[pid_f] = time.time()
-                                elif side_f == "SELL":
+                                if side_f == "SELL":
                                     if self.positions[pid_f] == 0.0 and self._entry_time.get(pid_f):
                                         hold_time_sec = max(0.0, time.time() - self._entry_time[pid_f])
                                         self._entry_time[pid_f] = None
                             except Exception:
                                 pass
-                            self._append_trade_csv(ts_iso=ts_iso, order_id=oid, side=side_f, product_id=pid_f,
+                            self._append_trade_csv(ts_iso=ts_iso, order_id=oid, side=side_f, coin_id=pid_f,
                                                    size=size_f, price=price_f, fee=fee_f,
                                                    liquidity=flag, pnl=pnl_fill,
                                                    position_after=self.positions.get(pid_f),
@@ -1801,14 +1856,20 @@ class TradeBot:
 
             # Guard each fill’s state mutations + CSV with the lock
             with self._state_lock:
+                # --- SNAPSHOT before any mutation (for correct SELL P&L/CSV) ---
+                qty_before_snapshot = float(self.positions.get(pid, 0.0))
+                cb_before_snapshot  = float(self.cost_basis.get(pid, 0.0))
                 if side == "BUY":
-                    new_qty = self.positions[pid] + size
-                    new_cost = self.cost_basis[pid] * self.positions[pid] + (size * price) + fee
+                    qty_before = qty_before_snapshot
+                    new_qty = qty_before + size
+                    new_cost = self.cost_basis[pid] * qty_before + (size * price) + fee
                     if new_qty > 0:
                         self.positions[pid] = new_qty
                         self.cost_basis[pid] = new_cost / new_qty
+                    if qty_before <= 0.0 and new_qty > 0.0:
+                        self._entry_time[pid] = time.time()
                 else:
-                    qty_before = self.positions[pid]
+                    qty_before = qty_before_snapshot
                     sell_qty = min(size, qty_before)
                     pnl_add = sell_qty * (price - self.cost_basis[pid]) - fee
                     self.realized_pnl += pnl_add
@@ -1830,22 +1891,18 @@ class TradeBot:
                     pnl_fill = None
                     if side == "SELL":
                         try:
-                            sell_qty = min(size, self.positions.get(pid, 0.0) + size)
-                            pnl_fill = sell_qty * (price - self.cost_basis[pid]) - fee
+                            sell_qty_csv = min(size, qty_before_snapshot)
+                            pnl_fill = sell_qty_csv * (price - cb_before_snapshot) - fee
                         except Exception:
                             pnl_fill = None
                     hold_time_sec = None
                     try:
-                        if side == "BUY":
-                            if (self.positions[pid] - size) <= 0 and self.positions[pid] > 0:
-                                self._entry_time[pid] = time.time()
-                        elif side == "SELL":
-                            if self.positions[pid] == 0.0 and self._entry_time.get(pid):
-                                hold_time_sec = max(0.0, time.time() - self._entry_time[pid])
-                                self._entry_time[pid] = None
+                        if side == "SELL" and self.positions[pid] == 0.0 and self._entry_time.get(pid):
+                            hold_time_sec = max(0.0, time.time() - self._entry_time[pid])
+                            self._entry_time[pid] = None
                     except Exception:
                         pass
-                    self._append_trade_csv(ts_iso=ts_iso, order_id=str(oid) if oid else None, side=side, product_id=pid,
+                    self._append_trade_csv(ts_iso=ts_iso, order_id=str(oid) if oid else None, side=side, coin_id=pid,
                                            size=size, price=price, fee=fee,
                                            liquidity=f.get("liquidity_indicator"), pnl=pnl_fill,
                                            position_after=self.positions.get(pid),
@@ -1876,14 +1933,14 @@ class TradeBot:
             run_str = f"{run_delta:.{PNL_DECIMALS}f}"
             logging.info("Reconciled fills. Lifetime P&L: $%s | This run: $%s", pnl_str, run_str)
 
-    def _on_candle_close(self, product_id: str, start_sec: int, close_price: float):
+    def _on_candle_close(self, coin_id: str, start_sec: int, close_price: float):
         # Update indicators once per closed candle
-        s = self.short[product_id].update(close_price)
-        l = self.long[product_id].update(close_price)
+        s = self.short[coin_id].update(close_price)
+        l = self.long[coin_id].update(close_price)
         if self.enable_advisors:
-            self._macd[product_id].update(close_price)
-            self._rsi[product_id].update(close_price)
-        self.ticks[product_id] += 1  # now counts candles
+            self._macd[coin_id].update(close_price)
+            self._rsi[coin_id].update(close_price)
+        self.ticks[coin_id] += 1  # now counts candles
         # Count candles closed since last telemetry heartbeat
         try:
             self._candles_closed += 1
@@ -1892,17 +1949,17 @@ class TradeBot:
             self._candles_closed = 1
         # Mark last closed-candle time for stall watchdog
         try:
-            self._last_candle_close_ts[product_id] = time.time()
+            self._last_candle_close_ts[coin_id] = time.time()
         except Exception:
             pass
 
         # ---- Quartermaster pre-check (take-profit / time-in-trade) ----
         try:
-            held_qty = max(0.0, float(self.positions.get(product_id, 0.0)))
+            held_qty = max(0.0, float(self.positions.get(coin_id, 0.0)))
             # If local position is empty (e.g., buys were before our fills lookback),
             # peek at live balances so Quartermaster uses a real number.
             try:
-                live_avail = float(self._get_live_available_base(product_id))
+                live_avail = float(self._get_live_available_base(coin_id))
             except Exception:
                 live_avail = -1.0
             if live_avail >= 0.0:
@@ -1910,12 +1967,12 @@ class TradeBot:
                 held_qty = min(held_cache, live_avail)
                 # If cache was empty but live shows a balance, seed cache
                 if held_cache <= 0.0 and live_avail > 0.0:
-                    self.positions[product_id] = live_avail
+                    self.positions[coin_id] = live_avail
 
             if held_qty > 0.0:
-                entry_price = float(self.cost_basis.get(product_id, 0.0) or 0.0)
-                macd_hist = self._macd[product_id].hist if self.enable_advisors else None
-                entry_ts = self._entry_time.get(product_id)
+                entry_price = float(self.cost_basis.get(coin_id, 0.0) or 0.0)
+                macd_hist = self._macd[coin_id].hist if self.enable_advisors else None
+                entry_ts = self._entry_time.get(coin_id)
                 hold_hours = 0.0
                 if entry_ts:
                     hold_hours = max(0.0, (time.time() - float(entry_ts)) / 3600.0)
@@ -1926,52 +1983,52 @@ class TradeBot:
                 )
                 if qm_ok:
                     # cooldown + throttle + dust guard
-                    cooldown_s = int(getattr(self.cfg, "per_product_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
+                    cooldown_s = int(getattr(self.cfg, "per_coin_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
                     now_ts = time.time()
                     # Dust/threshold suppression window honored
-                    if now_ts < float(self._qm_dust_suppress_until[product_id] or 0.0):
+                    if now_ts < float(self._qm_dust_suppress_until[coin_id] or 0.0):
                         return
                     # Require at least one increment or min-market base size (optionally buffered)
                     try:
-                        base_inc = float(self.base_inc.get(product_id, 1e-8))
+                        base_inc = float(self.base_inc.get(coin_id, 1e-8))
                     except Exception:
                         base_inc = 1e-8
-                    min_mkt = float(self.min_market_base_size.get(product_id, 0.0) or 0.0)
+                    min_mkt = float(self.min_market_base_size.get(coin_id, 0.0) or 0.0)
                     sell_floor = max(base_inc, min_mkt)
                     buffer_mult = 1.0  # keep exact-inc allowed; raise to 1.1 for extra safety if desired
                     sell_required = sell_floor * buffer_mult
                     if held_qty + 1e-18 < sell_required:
                         suppress_min = 30  # configurable if needed
-                        self._qm_dust_suppress_until[product_id] = now_ts + suppress_min * 60
+                        self._qm_dust_suppress_until[coin_id] = now_ts + suppress_min * 60
                         logging.info(
                             "Quartermaster: suppressing SELL %s for %d min "
                             "(held=%.10f < required=%.10f, inc=%g, min_mkt=%.10f).",
-                            product_id, suppress_min, held_qty, sell_required, base_inc, min_mkt
+                            coin_id, suppress_min, held_qty, sell_required, base_inc, min_mkt
                         )
                         return
                         
-                    if not self.last.ok(product_id, cooldown_s):
+                    if not self.last.ok(coin_id, cooldown_s):
                         return
-                    if now_ts - float(self._qm_last_ts[product_id] or 0.0) < min(60, cooldown_s):
+                    if now_ts - float(self._qm_last_ts[coin_id] or 0.0) < min(60, cooldown_s):
                         return
-                    min_base = float(self.base_inc.get(product_id, 1e-8))
+                    min_base = float(self.base_inc.get(coin_id, 1e-8))
                     if held_qty < (min_base * 0.99):
                         return
 
                     quote_usd = held_qty * close_price
                     logging.info("Quartermaster triggered SELL attempt %s: held=%.10f close=%.8f reason=%s",
-                                 product_id, held_qty, close_price, qm_reason)
+                                 coin_id, held_qty, close_price, qm_reason)
                     # Actually place the exit order
-                    self.place_order(product_id, side="SELL", quote_usd=quote_usd,
+                    self.place_order(coin_id, side="SELL", quote_usd=quote_usd,
                                      last_price=close_price, reason=qm_reason)
-                    self._qm_last_ts[product_id] = now_ts
-                    return  # one decisive action per candle per product
+                    self._qm_last_ts[coin_id] = now_ts
+                    return  # one decisive action per candle per coin
         except Exception as _e:
-            logging.debug("Quartermaster check failed for %s: %s", product_id, _e)
+            logging.debug("Quartermaster check failed for %s: %s", coin_id, _e)
 
-        min_needed = self.min_ticks_per_product.get(product_id, int(getattr(self.cfg, "min_candles", getattr(self.cfg, "min_ticks", 60))))
-        if self.ticks[product_id] >= min_needed and s is not None and l is not None:
-            self.evaluate_signal(product_id, close_price, s, l)
+        min_needed = self.min_ticks_per_coin.get(coin_id, int(getattr(self.cfg, "min_candles", getattr(self.cfg, "min_ticks", 60))))
+        if self.ticks[coin_id] >= min_needed and s is not None and l is not None:
+            self.evaluate_signal(coin_id, close_price, s, l)
 
     def reconcile_now(self, hours: Optional[int] = None) -> None:
         """Idempotent, reentrant-safe sweep of recent fills."""

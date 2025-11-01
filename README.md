@@ -1,4 +1,4 @@
-# Tradebot v1.1.3
+# Tradebot v1.1.4
 
 [![Latest version](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver&include_prereleases)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -11,7 +11,7 @@
 
 ---
 
-⚙️ **Maintenance, resilience, and connectivity upgrades**
+⚙️ Full CLI Control, AutoTune Transparency and Runtime Flexibility
 
 ---
 
@@ -59,49 +59,20 @@ Together they form a chain of command:
   - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
   - [docs/RUNBOOK.md](docs/RUNBOOK.md)
   - [USAGE.md](USAGE.md)
-  - [CONTRIBUTING.md](CONTRIBUTING.md)
   - [CHANGELOG.md](CHANGELOG.md)
 
 ---
 
-## ✨ v1.1.3 Highlights
-- **Command-line overrides**: you can now change core settings at runtime without editing files.
-  Examples:
+## ✨ v1.1.4 Highlights
+- **Full CLI parameterization** — Nearly every runtime value can now be set directly from the command line:
   ```bash
-  python main.py --dry-run=true
-  python main.py --enable-quartermaster=false --mid-session-reconcile
-  python main.py --usd-per-order=10 --max-spend-cap=200
-  python main.py --dry-run off --products=SOL-USD,PEPE-USD,AVAX-USD
-  python main.py --help
+  python main.py --enable-autotune=0 --confirm-candles=1 --cooldown-time=200 --deadband=4
+  python main.py --quartermaster-profit=1200 --quartermaster-hold-time=36 --stop-loss=300
+  python main.py --candle-mode=local --candle-interval=1m --prefer-maker=1 --prefer-maker-for-sells=no
   ```
-- **Quartermaster 2.0**  
-  The Take-Profit & Stagnation Officer now includes:
-  - Live-balance verification before exits  
-  - Dust suppression window (30 min default)  
-  - Internal throttles to prevent duplicate signals within a candle  
-  - Market-only execution with accurate `exit_reason` tagging in `trades.csv`.
-  
-- **Smarter BLEND regime weighting**  
-  AutoTune now applies quantized, weighted, and bounded adjustments instead of fractional drifts — leading to more stable transitions between choppy and trending modes.
-
-- **Local Candle Settle Queue**  
-  Local-mode aggregation now delays candle closes by 150 ms to ensure the last ticks of each bucket are captured, eliminating premature crossovers.
-
-- **Improved portfolio realism**  
-  On startup, live exchange balances are cross-checked; if the cache shows zero but funds exist, the bot seeds positions automatically.
-
-- **Enhanced stability**  
-  Quartermaster, spend tracking, and CSV logging now operate with unified state locks.  
-  Logs include the friendly “YO SWAB!” hygiene line whenever fills are pruned.
-  
-- **Smarter BLEND regime weighting**  
-  AutoTune now applies quantized, weighted, and bounded adjustments instead of fractional drifts — leading to more stable transitions between choppy and trending modes.
-
-- Connectivity resilience improved; reduced REST spam; calculated fallback handling during Coinbase downtime without    interrupting trade flow.
-
 ---
 
-### Upgrade notes
+### 🔧 Upgrade notes
 - Improved BLEND functionality with autotune.
 - Added CLI overrides.
 - Backward-compatible with v1.0.9 state files.  
@@ -110,7 +81,14 @@ Together they form a chain of command:
 
 ---
 
-## Risk controls
+### 🧑‍💻 Developer Notes
+- The CLI system now builds help text dynamically using live values from `config.py`.
+- Boolean flags use a unified `_BOOL_KW` parser shared across runtime and maker options.
+- Help epilog automatically includes both defaults and AutoTune behavior notes.
+
+---
+
+## ⚖️ Risk controls
 
 - **Daily BUY cap**: limits the number of BUYs per day to curb overtrading during chop. Logged as  
   `**********Daily BUY cap reached (N). Skipping further BUYs.**********`
