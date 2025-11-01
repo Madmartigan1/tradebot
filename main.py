@@ -1,4 +1,4 @@
-# main.py (v1.1.3 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
+# main.py (v1.1.4 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
@@ -14,6 +14,15 @@ from dotenv import load_dotenv
 from bot.config import CONFIG, validate_config
 from bot.autotune import autotune_config
 from bot.tradebot import TradeBot
+
+# Commented out to keep clearer formatting
+#if os.name == "nt":
+#   try:
+#        sys.stdout.reconfigure(encoding="utf-8")
+#        sys.stderr.reconfigure(encoding="utf-8")
+#    except Exception:
+#        pass
+
 
 # Optional elapsed-time AutoTune refresh (one-shot after N hours)
 AUTOTUNE_ELAPSED_REFRESH_ENABLED = True
@@ -32,46 +41,148 @@ def _str2bool(v: str) -> bool:
         return False
     raise argparse.ArgumentTypeError(f"Expected boolean, got {v!r}")
     
-def _parse_products_arg(s: str):
+def _parse_coins_delta(s: str) -> dict[str, list[str]]:
     """
-    Supports:
-      - replace:  'BTC-USD,ETH-USD'
-      - add:      '+BTC-USD,ETH-USD'
-      - remove:   '-DOGE-USD,PEPE-USD'
-    Returns (mode, items) where mode in {'replace','add','remove'} and items is a list[str].
+    Parse a comma list with *sticky* operators:
+      - A leading '=' means full replacement: '=A,B,C'
+      - '+' or '-' sets the current mode and applies to subsequent bare tokens
+        until another operator appears:
+          '-DOGE-USD,PEPE-USD,+TAO-USD,ZEC-USD' → remove DOGE & PEPE; add TAO & ZEC
+      - If no operator has been set yet, bare tokens default to +add.
+    Returns {'add':[], 'remove':[], 'replace':[]}.
     """
-    if s is None:
-        return None, []
-    txt = str(s).strip()
-    mode = "replace"
-    if txt.startswith("+"):
-        mode, txt = "add", txt[1:]
-    elif txt.startswith("-"):
-        mode, txt = "remove", txt[1:]
-    items = [x.strip().upper() for x in txt.split(",") if x.strip()]
-    return mode, items
+    adds, removes, repl = [], [], []
+    txt = (s or "").strip()
+    if not txt:
+        return {"add": adds, "remove": removes, "replace": repl}
+
+    # Explicit full replacement if the entire arg starts with '='
+    if txt.startswith("="):
+        body = txt[1:]
+        repl = [t.strip().upper() for t in body.split(",") if t.strip()]
+        return {"add": [], "remove": [], "replace": repl}
+
+    # Sticky +/- mode across tokens until changed
+    mode = "add"  # default until we see an operator
+    for raw in txt.split(","):
+        tok = raw.strip()
+        if not tok:
+            continue
+        op = tok[0]
+        if op in {"+", "-"}:
+            tok = tok[1:].strip()
+            if not tok:
+                continue
+            mode = "add" if op == "+" else "remove"
+        sym = tok.upper()
+        if mode == "remove":
+            removes.append(sym)
+        else:
+            adds.append(sym)
+    return {"add": adds, "remove": removes, "replace": repl}
 
 # --- pretty help formatter that preserves newlines without overrides ---
 class TradeBotHelp(argparse.RawTextHelpFormatter):
     def __init__(self, prog):
         # Wider second column and overall width; RawText keeps your \n formatting
-        super().__init__(prog, max_help_position=34, width=130)
+        super().__init__(prog, max_help_position=70, width=160)
         
 # Boolean flags as explicit true/false (no --no-* variants)
 _BOOL_KW = {"type": _str2bool, "nargs": "?", "const": True, "metavar": "1|0"}
 
 def parse_cli_overrides(argv=None):
+    # Build a Defaults section from current CONFIG so help is truthful without cluttering each flag line
+    defaults_lines = [
+        "Defaults:",
+        f"  dry_run: {CONFIG.dry_run}",
+        f"  usd_per_order: {CONFIG.usd_per_order}",
+        f"  daily_spend_cap_usd: {CONFIG.daily_spend_cap_usd}",
+        f"  mode: {getattr(CONFIG, 'mode', 'local')}",
+        f"  candle_interval: {getattr(CONFIG, 'candle_interval', '5m')}",
+        f"  confirm_candles: {getattr(CONFIG, 'confirm_candles', 3)}",
+        f"  ema_deadband_bps: {getattr(CONFIG, 'ema_deadband_bps', 6.0)}",
+        f"  short_ema: {getattr(CONFIG, 'short_ema', 40)}",
+        f"  long_ema: {getattr(CONFIG, 'long_ema', 120)}",
+        f"  rsi_period: {getattr(CONFIG, 'rsi_period', 14)}",
+        f"  rsi_buy_max: {getattr(CONFIG, 'rsi_buy_max', 65.0)}",
+        f"  rsi_sell_min: {getattr(CONFIG, 'rsi_sell_min', 35.0)}",
+        f"  macd_fast: {getattr(CONFIG, 'macd_fast', 12)}",
+        f"  macd_slow: {getattr(CONFIG, 'macd_slow', 26)}",
+        f"  macd_signal: {getattr(CONFIG, 'macd_signal', 9)}",
+        f"  macd_buy_min: {getattr(CONFIG, 'macd_buy_min', 2.0)}",
+        f"  macd_sell_max: {getattr(CONFIG, 'macd_sell_max', -2.0)}",
+        f"  autotune_enabled: {getattr(CONFIG, 'autotune_enabled', True)}",
+        f"  lookback_hours: {getattr(CONFIG, 'lookback_hours', 72)}",
+        f"  enable_quartermaster: {getattr(CONFIG, 'enable_quartermaster', False)}",
+        f"  take_profit_bps: {getattr(CONFIG, 'take_profit_bps', 1200)}",
+        f"  max_hold_hours: {getattr(CONFIG, 'max_hold_hours', 36)}",
+        f"  stagnation_close_bps: {getattr(CONFIG, 'stagnation_close_bps', 200)}",
+        f"  mid_reconcile_enabled: {getattr(CONFIG, 'mid_reconcile_enabled', True)}",
+        f"  mid_reconcile_interval_minutes: {getattr(CONFIG, 'mid_reconcile_interval_minutes', 90)}",
+        f"  enable_advisors: {getattr(CONFIG, 'enable_advisors', True)}",
+        f"  per_coin_cooldown_s: {getattr(CONFIG, 'per_coin_cooldown_s', 600)}",
+        f"  hard_stop_bps: {getattr(CONFIG, 'hard_stop_bps', 300)}",
+        f"  prefer_maker: {getattr(CONFIG, 'prefer_maker', True)}",
+        f"  prefer_maker_for_sells: {getattr(CONFIG, 'prefer_maker_for_sells', True)}",
+        f"  maker_offset_bps: {getattr(CONFIG, 'maker_offset_bps', 10.0)}",
+        "",
+        "  Default coin pairs:",
+        """\
+        ┌──────────┬──────────┬──────────┐
+        │ ETH-USD  │ XRP-USD  │ ADA-USD  │
+        │ TRAC-USD │ ALGO-USD │ XLM-USD  │
+        │ HBAR-USD │ NEAR-USD │ SOL-USD  │
+        │ DOGE-USD │ AVAX-USD │ LINK-USD │
+        │ SUI-USD  │ LTC-USD  │ CRO-USD  │
+        │ DOT-USD  │ ARB-USD  │ IP-USD   │
+        │ FLOKI-USD│ PEPE-USD │ BONK-USD │
+        │ SEI-USD  │ SHIB-USD │ POL-USD  │
+        └──────────┴──────────┴──────────┘
+        """, 
+    ]
+    epilog_text = "\n".join(defaults_lines)
+    
+    autotune_overrides = [
+        "",
+        "AutoTune may override at runtime:",
+        "  • confirm_candles",
+        "  • per_coin_cooldown_s",
+        "  • rsi_buy_max, rsi_sell_min",
+        "  • macd_buy_min, macd_sell_max",
+        "  • ema_deadband_bps",
+        "  • maker_offset_bps_per_coin (per-asset offsets)",
+        "",
+        "AutoTune does NOT change:",
+        "  • candle_interval, mode (ws/local)",
+        "  • short_ema, long_ema (EMA lengths)",
+        "  • usd_per_order, daily_spend_cap_usd",
+        "  • prefer_maker / prefer_maker_for_sells",
+        "  • stop-loss (hard_stop_bps)",
+        "  • Coin list (beyond advisory telemetry notes)",
+        "",
+        "Tip: To force your own parameters, disable AutoTune, e.g.:",
+        "  python main.py --enable-autotune=0 --confirm-candles=1 --cooldown-time=200 --deadband=4 --short-ema=50 --long-ema=110",
+    ]
+    epilog_text = "\n".join(defaults_lines + autotune_overrides)
+    
     p = argparse.ArgumentParser(
         add_help=True,
         description="Tradebot — adaptive Coinbase trading bot",
         formatter_class=TradeBotHelp,
+        epilog=epilog_text,
     )
     # Organize flags into readable groups
     g_run = p.add_argument_group("Runtime overrides")
     g_limits = p.add_argument_group("Limits")
-    g_products = p.add_argument_group("Product selection")
+    g_coins = p.add_argument_group("Coin selection")
+    g_candles = p.add_argument_group("Candles and lookback")
+    g_orders = p.add_argument_group("Order placement")
+    g_qm = p.add_argument_group("Quartermaster exits")
+    g_risk = p.add_argument_group("Risk & pacing")
+    g_maker = p.add_argument_group("Maker settings")
+    g_ind = p.add_argument_group("Indicators (EMA/RSI/MACD)")
     
-    # booleans (BooleanOptionalAction removes noisy [METAVAR] and adds --no-*)
+    # booleans (BooleanOptionalAction removes noisy [METAVAR] and adds [bool])
     g_run.add_argument(
         "--dry-run",
         dest="dry_run",
@@ -85,12 +196,24 @@ def parse_cli_overrides(argv=None):
         help="Enable or disable Quartermaster depletion logic.",
     )
     g_run.add_argument(
+        "--enable-autotune",
+        dest="autotune_enabled",
+        **_BOOL_KW,
+        help="Enable or disable AutoTune at startup (and the optional elapsed refresh).",
+    )
+    g_run.add_argument(
         "--mid-session-reconcile",
         dest="mid_reconcile_enabled",
         **_BOOL_KW,
         help="Enable or disable the mid-session reconcile scheduler.",
     )
-
+    g_run.add_argument(
+        "--enable-advisors",
+        dest="enable_advisors",
+        **_BOOL_KW,
+        help="Enable or disable RSI/MACD advisors.",
+    )
+    
     # money / limits
     g_limits.add_argument(
         "--usd-per-order",
@@ -106,23 +229,205 @@ def parse_cli_overrides(argv=None):
         metavar="USD",
         help="Daily USD spend cap for buys (sells continue).",
     )
+    
+    # candles & lookback
+    g_candles.add_argument(
+        "--candle-mode",
+        dest="mode",
+        type=lambda s: s.strip().lower(),
+        choices=["ws", "local"],
+        metavar="ws|local",
+        help="Select candle builder: 'ws' (server candles) or 'local' (client-side candles).",
+    )
+    g_candles.add_argument(
+        "--candle-interval",
+        dest="candle_interval",
+        type=str,
+        metavar="1m|5m|15m",
+        help="Candle interval for trading indicators (e.g., 1m, 5m, 15m).",
+    )
+    g_candles.add_argument(
+        "--confirm-candles",
+        dest="confirm_candles",
+        type=int,
+        metavar="N",
+        help="Consecutive cross confirmations (1–5).",
+    )
+    g_candles.add_argument(
+        "--lookback-hours",
+        dest="lookback_hours",
+        type=int,
+        metavar="HOURS",
+        help="Historical fills lookback window used by reconcile/startup (hours).",
+    )
+    g_candles.add_argument(
+        "--mid-reconcile-interval",
+        dest="mid_reconcile_interval_minutes",
+        type=int,
+        metavar="MIN",
+        help="Mid-session reconcile sweep cadence (minutes).",
+    )
 
-    # products (multiline example kept tidy with explicit newlines)
-    g_products.add_argument(
-        "--products",
-        dest="products",
+    # quartermaster exits
+    g_qm.add_argument(
+        "--quartermaster-profit",
+        dest="take_profit_bps",
+        type=int,
+        metavar="BPS",
+        help="Quartermaster take-profit target in basis points (e.g., 1200 = 12%%).",
+    )
+    g_qm.add_argument(
+        "--quartermaster-hold-time",
+        dest="max_hold_hours",
+        type=int,
+        metavar="HOURS",
+        help="Quartermaster max hold time before exit (hours).",
+    )
+    g_qm.add_argument(
+        "--quartermaster-stagnation-exit",
+        dest="stagnation_close_bps",
+        type=int,
+        metavar="BPS",
+        help="Quartermaster stagnation exit threshold in basis points.",
+    )
+
+    # risk & pacing
+    g_risk.add_argument(
+        "--cooldown-time",
+        dest="per_coin_cooldown_s",
+        type=int,
+        metavar="SEC",
+        help="Per-coin cooldown between signals (seconds).",
+    )
+    g_risk.add_argument(
+        "--stop-loss",
+        dest="hard_stop_bps",
+        type=int,
+        metavar="BPS",
+        help="Emergency stop loss in basis points (set to 0 to effectively disable).",
+    )
+    g_risk.add_argument(
+        "--deadband",
+        dest="ema_deadband_bps",
+        type=float,
+        metavar="BPS",
+        help="EMA crossover deadband in basis points (reduces chop).",
+    )
+    
+    # indicators: EMA / RSI / MACD
+    g_ind.add_argument(
+        "--short-ema",
+        dest="short_ema",
+        type=int,
+        metavar="N",
+        help="Short EMA period (must be < long EMA; validator will swap to 40/120 if unsafe).",
+    )
+    g_ind.add_argument(
+        "--long-ema",
+        dest="long_ema",
+        type=int,
+        metavar="N",
+        help="Long EMA period (must be > short EMA; validator will swap to 40/120 if unsafe).",
+    )
+    g_ind.add_argument(
+        "--rsi-period",
+        dest="rsi_period",
+        type=int,
+        metavar="N",
+        help="RSI lookback period.",
+    )
+    g_ind.add_argument(
+        "--rsi-max",
+        dest="rsi_buy_max",
+        type=float,
+        metavar="VAL",
+        help="BUY only if RSI ≤ VAL.",
+    )
+    g_ind.add_argument(
+        "--rsi-min",
+        dest="rsi_sell_min",
+        type=float,
+        metavar="VAL",
+        help="SELL only if RSI ≥ VAL.",
+    )
+    g_ind.add_argument(
+        "--macd-fast",
+        dest="macd_fast",
+        type=int,
+        metavar="N",
+        help="MACD fast EMA length.",
+    )
+    g_ind.add_argument(
+        "--macd-slow",
+        dest="macd_slow",
+        type=int,
+        metavar="N",
+        help="MACD slow EMA length.",
+    )
+    g_ind.add_argument(
+        "--macd-signal",
+        dest="macd_signal",
+        type=int,
+        metavar="N",
+        help="MACD signal EMA length.",
+    )
+    g_ind.add_argument(
+        "--macd-min",
+        dest="macd_buy_min",
+        type=float,
+        metavar="BPS",
+        help="BUY only if MACD ≥ BPS (basis points).",
+    )
+    g_ind.add_argument(
+        "--macd-max",
+        dest="macd_sell_max",
+        type=float,
+        metavar="BPS",
+        help="SELL only if MACD ≤ BPS (basis points).",
+    )
+    
+    # maker settings
+    g_maker.add_argument(
+        "--maker-offset",
+        dest="maker_offset_bps",
+        type=float,
+        metavar="BPS",
+        help="Default maker offset in basis points (per-coin AutoTune may override).",
+    )
+    
+    # order placement preferences
+    g_orders.add_argument(
+        "--prefer-maker",
+        dest="prefer_maker",
+        **_BOOL_KW,
+        help="Prefer post-only maker orders when possible.",
+    )
+    g_orders.add_argument(
+        "--prefer-maker-for-sells",
+        dest="prefer_maker_for_sells",
+        **_BOOL_KW,
+        help="Apply post-only preference to sell/exit orders as well.",
+    )
+
+    # coins (multiline example kept tidy with explicit newlines)
+    g_coins.add_argument(
+        "--coins",
+        dest="coins",
+        action="append",          # allow multiple occurrences
         type=str,
         metavar="LIST",
         help=(
-            "Set (+add) or -remove products.\n"
-            "  replace :  'BTC-USD,ETH-USD'\n"
-            "  add     :  '+SOL-USD,AVAX-USD'\n"
-            "  remove  :  '-DOGE-USD,PEPE-USD'"
+            "Add/remove/replace coins. Operators are *sticky* until changed:\n"
+            "  add      :  '+SOL-USD,+AVAX-USD,+ALGO-USD'\n"
+            "  remove   :  '-DOGE-USD,-PEPE-USD'\n"
+            "  mixed    :  '-BONK-USD,FLOKI-USD,+TAO-USD,ZEC-USD,TRUMP-USD'\n"
+            "                 (removes BONK & FLOKI; adds TAO, ZEC, TRUMP)\n"
+            "  replace  :  '=BTC-USD,ETH-USD'  (leading '=' replaces the whole list)"
         ),
     )
+    
     return p.parse_known_args(argv)[0]
     
-
 def _finalize_and_exit(code: int = 0):
     try:
         logging.shutdown()
@@ -219,6 +524,12 @@ def _elapsed_autotune_once_with_bot(
             rest=getattr(bot, "rest", None),  # reuse the running bot's client
             preview_only=getattr(CONFIG, "autotune_preview_only", True),
         )
+        # Keep AutoTune results scoped to currently active coins
+        active = set(getattr(CONFIG, "coin_ids", []))
+        offsets = {k: v for k, v in (summary.get("offsets_changed") or {}).items() if k in active}
+        summary["offsets_changed"] = offsets
+        disabled = [p for p in (summary.get("disabled_coins") or []) if p in active]
+        summary["disabled_coins"] = disabled
         logger.info(
             "AUTOTUNE(elapsed %dh): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
             AUTOTUNE_ELAPSED_REFRESH_HOURS,
@@ -229,10 +540,23 @@ def _elapsed_autotune_once_with_bot(
             float(summary.get("alpha") or 0.0),
         )
         logger.info("AUTOTUNE(elapsed) votes: %s", summary.get("portfolio_vote"))
-        logger.info("AUTOTUNE(elapsed) knob changes: %s\n", summary.get("global_changes"))
-        logger.info("AUTOTUNE(elapsed) offsets (post 3d KPI nudges): %s\n", summary.get("offsets_changed"))
-        if summary.get("disabled_products"):
-            logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s\n", summary.get("disabled_products"))
+        logger.info("AUTOTUNE(elapsed) knob changes: %s", summary.get("global_changes"))
+
+        # Offsets: guard + show only active coins
+        active = set(getattr(CONFIG, "coin_ids", []))
+        offsets_all = summary.get("offsets_changed") or summary.get("offsets") or {}
+        if isinstance(offsets_all, dict):
+            offsets_active = {k: v for k, v in offsets_all.items() if k in active}
+            if offsets_active:
+                logger.info("AUTOTUNE(elapsed) offsets (active only): %s", offsets_active)
+            else:
+                logger.info("AUTOTUNE(elapsed) offsets: (none for active set)")
+        else:
+            logger.info("AUTOTUNE(elapsed) offsets: (not provided)")
+
+        cands = (summary.get("disabled_coins") or []) if isinstance(summary, dict) else []
+        if cands:
+            logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s", cands)
         logger.info("AUTOTUNE (elapsed): complete.")
     except Exception as e:
         logger.exception("AUTOTUNE (elapsed) failed: %s", e)
@@ -260,27 +584,42 @@ def main():
     args = parse_cli_overrides(sys.argv[1:])
     overrides = {}
     
-    # Handle --products specially (supports add/remove/replace semantics)
-    if getattr(args, "products", None):
-        mode, symbols = _parse_products_arg(args.products)
-        current = [s.strip().upper() for s in getattr(CONFIG, "product_ids", [])]
-        if mode == "replace":
-            new_list = list(dict.fromkeys(symbols))  # dedupe, keep order
-        elif mode == "add":
-            new_list = list(dict.fromkeys(current + symbols))
-        elif mode == "remove":
-            rm = set(symbols)
-            new_list = [s for s in current if s not in rm]
+    # Handle --coins specially (supports single flag with mixed +/- and bare tokens)
+    if getattr(args, "coins", None):
+        # Merge deltas from all provided --coins flags (works with one or many)
+        merged = {"add": [], "remove": [], "replace": []}
+        for chunk in args.coins:
+            d = _parse_coins_delta(chunk)
+            merged["add"].extend(d["add"])
+            merged["remove"].extend(d["remove"])
+            merged["replace"].extend(d["replace"])
+
+        # Start from explicit replacement base (if any bare tokens were supplied),
+        # otherwise from current CONFIG defaults.
+        current = [s.strip().upper() for s in getattr(CONFIG, "coin_ids", [])]
+        if merged["replace"]:
+            new_list = list(dict.fromkeys(merged["replace"]))  # de-dupe, preserve order
         else:
-            new_list = current
+            new_list = list(current)
+
+        # Apply removals
+        if merged["remove"]:
+            to_remove = set(merged["remove"])
+            new_list = [c for c in new_list if c not in to_remove]
+
+        # Apply additions (append in order; skip duplicates)
+        for c in merged["add"]:
+            if c not in new_list:
+                new_list.append(c)
+
         if new_list:
-            CONFIG.product_ids = new_list
-            overrides["product_ids"] = new_list
+            CONFIG.coin_ids = new_list
+            overrides["coin_ids"] = new_list
         else:
-            log.warning("After applying --products, product list is empty; keeping default list.")
+            log.warning("After applying --coins, coin list is empty; keeping default list.")
         
     for k, v in vars(args).items():
-        if k == "products":
+        if k == "coins":
             continue
         if v is not None:
             setattr(CONFIG, k, v)
@@ -373,14 +712,26 @@ def main():
                 float(summary.get("alpha") or 0.0),
             )
             log.info("AUTOTUNE votes: %s", summary.get("portfolio_vote"))
-            log.info("AUTOTUNE knob changes: %s\n", summary.get("global_changes"))
-            log.info("AUTOTUNE offsets (post 3d KPI nudges): %s\n", summary.get("offsets_changed"))
-            if summary.get("disabled_products"):
-                cands = summary.get("disabled_products") or []
-                details = summary.get("disabled_details") or {}
-                if cands:
-                    pretty = ", ".join(f"{p}({details.get(p,'')})" if p in details else p for p in cands)
-                    log.info("AUTOTUNE (advisory only) would disable: %s\n", pretty)
+            log.info("AUTOTUNE knob changes: %s", summary.get("global_changes"))
+
+            # Offsets: guard + show only active coins
+            active = set(getattr(CONFIG, "coin_ids", []))
+            offsets_all = summary.get("offsets_changed") or summary.get("offsets") or {}
+            if isinstance(offsets_all, dict):
+                offsets_active = {k: v for k, v in offsets_all.items() if k in active}
+                if offsets_active:
+                    log.info("AUTOTUNE offsets (active only): %s", offsets_active)
+                else:
+                    log.info("AUTOTUNE offsets: (none for active set)")
+            else:
+                log.info("AUTOTUNE offsets: (not provided)")
+
+            # Optional advisory disables
+            cands = (summary.get("disabled_coins") or []) if isinstance(summary, dict) else []
+            details = (summary.get("disabled_details") or {}) if isinstance(summary, dict) else {}
+            if cands:
+                pretty = ", ".join(f"{p}({details.get(p,'')})" if p in details else p for p in cands)
+                log.info("AUTOTUNE (advisory only) would disable: %s", pretty)
         except Exception as e:
             log.warning("Autotune failed (continuing with current config): %s", e)
 
