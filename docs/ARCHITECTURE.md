@@ -1,8 +1,8 @@
 # Coinbase Trade Bot — Architecture
 
-> Version: v1.1.0 (Quartermaster + Local Candle Settle)
+> Version: v1.1.4 (Quartermaster + Local Candle Settle + richer CLI)
 
-This document maps the moving parts of the bot, how they interact, and where the key extension points live.
+This document maps the moving parts of the bot, how they interact, and where the key extension points live. It reflects the codebase you shared:
 
 - `main.py`
 - `bot/config.py`
@@ -26,9 +26,9 @@ The bot is an EMA crossover system with advisor vetoes (RSI/MACD), optional make
 1. **Market data** → WS ticker and (optionally) WS candles. If `mode=local`, we aggregate candles from tickers.
 2. **Indicators** → EMA(40/120 default) + RSI/MACD compute on candle close.
 3. **Signals** → EMA cross + confirm_x candles (+ localized band grace for `local` mode) feed BUY/SELL intent.
-4. **Guards** → Per‑product cooldown, daily spend cap (BUY‑only), position checks before SELL, hard stop, advisor veto.
+4. **Guards** → Per‑coin cooldown, daily spend cap (BUY‑only), position checks before SELL, hard stop, advisor veto.
 5. **Quartermaster** → Pre‑EMA check on each candle: decide immediate SELL for take‑profit or stagnation.
-6. **Orders** → Prefer maker LMT (post‑only) with per‑product bps offsets; market for forced exits.
+6. **Orders** → Prefer maker LMT (post‑only) with per‑coin bps offsets; market for forced exits.
 7. **Reconcile** → Immediate fills after each order; periodic historical fills sweep; CSV + portfolio persisted.
 
 ---
@@ -39,7 +39,7 @@ The bot is an EMA crossover system with advisor vetoes (RSI/MACD), optional make
 **Responsibilities:** runtime orchestration, WS/REST integration, signals, orders, reconciliation, P&L.
 
 - **WS layer** (`coinbase.websocket.WSClient`)
-  - Subscribes to ticker for all products.
+  - Subscribes to ticker for all coins.
   - Subscribes to WS candles if `mode=ws`; otherwise builds candles locally.
   - Heartbeats (best effort).
   - Resilient loop with exponential back‑off and re‑subscription.
@@ -50,12 +50,13 @@ The bot is an EMA crossover system with advisor vetoes (RSI/MACD), optional make
 
 - **Indicators** (`indicators.py`)
   - `EMA`, `RSI`, `MACD` updated on **candle close**.
-  - Per‑product EMA params with global defaults and overrides.
+  - Per‑coin EMA params with global defaults and overrides.
 
 - **Signal engine**
   - Computes **relative** trend using EMA cross with deadband (`ema_deadband_bps`).
   - Requires `confirm_candles` consecutive candles; in `local` mode, one neutral band candle preserves the count (band‑grace).
-  - Enforces per‑product cooldown.
+  - Enforces per‑coin cooldown.
+  - `confirm_candles` and `ema_deadband_bps` now have CLI flags and may be nudged by AutoTune (bounded).
 
 - **Advisors** (`strategy.py`)
   - Optional veto layer with RSI ceiling/floor and MACD histogram thresholds (bps‑normalized).
@@ -68,14 +69,14 @@ The bot is an EMA crossover system with advisor vetoes (RSI/MACD), optional make
   - Uses **market SELL** (forced immediate) for decisive exits.
 
 - **Orders** (`orders.py`)
-  - **Maker‑first** by default with per‑product offsets (`maker_offset_bps_per_product`, fallback `maker_offset_bps`).
+  - **Maker‑first** by default with per‑coin offsets (`maker_offset_bps_per_coin`, fallback `maker_offset_bps`).
   - SELL sizes are clamped to *live* available base to avoid reserve/hold issues.
   - Forced exits (`take_profit`, `stagnation`, `stop_loss`) always use **market**.
   - Success normalization via `_resp_ok` prevents false positives on rejected post‑only orders.
 
 - **Spend & cooldown** (`utils.py`)
   - `SpendTracker` tracks BUY notional per UTC day; `daily_spend_cap_usd` gates further BUYs.
-  - `LastTradeTracker` enforces per‑product cooldown (`per_product_cooldown_s`).
+  - `LastTradeTracker` enforces per‑coin cooldown (`per_coin_cooldown_s`).
 
 - **Portfolio & P&L** (`persistence.py` + `utils.py`)
   - Positions, cost basis, realized P&L persisted (`PORTFOLIO_FILE`).
@@ -88,22 +89,22 @@ The bot is an EMA crossover system with advisor vetoes (RSI/MACD), optional make
 
 - **AutoTune** (`autotune.py`)
   - Computes regime votes on a separate timeframe (`autotune_vote_interval`, default 15m) using its lookback.
-  - Applies **bounded** knob nudges (confirm, cooldown, RSI/MACD, deadband, per‑product offsets) depending on winner or blend share.
+  - Applies **bounded** knob nudges (confirm, cooldown, RSI/MACD, deadband, per‑coin offsets) depending on winner or blend share.
   - Logs regime and deltas; trading timeframe remains at the candle interval (e.g., 5m).
 
 ---
 
 ## 3) Configuration (`config.py`)
 
-- **Trading universe**: `product_ids`
+- **Trading universe**: `coin_ids`
 - **Mode**: `mode = "ws" | "local"`
 - **Interval**: `candle_interval = "1m"|"5m"|...` → `granularity_sec`
 - **Warm‑up**: `warmup_candles`, `min_candles`, `confirm_candles`
-- **EMA**: `short_ema`, `long_ema`, optional `ema_params_per_product`
+- **EMA**: `short_ema`, `long_ema`, optional `ema_params_per_coin`
 - **Advisors**: `enable_advisors`, `rsi_*`, `macd_*`, `ema_deadband_bps`
 - **Quartermaster**: `enable_quartermaster`, `take_profit_bps`, `max_hold_hours`, `stagnation_close_bps`, `quartermaster_respect_macd`, `flat_macd_abs_max`, `full_exit_shave_increments`
-- **Spend/cooldown**: `usd_per_order`, `daily_spend_cap_usd`, `per_product_cooldown_s`, `hard_stop_bps`
-- **Orders**: `prefer_maker`, `prefer_maker_for_sells`, `maker_offset_bps(_per_product)`, `maker_reprice_*`
+- **Spend/cooldown**: `usd_per_order`, `daily_spend_cap_usd`, `per_coin_cooldown_s`, `hard_stop_bps`
+- **Orders**: `prefer_maker`, `prefer_maker_for_sells`, `maker_offset_bps(_per_coin)`, `maker_reprice_*`
 - **Data hygiene**: `use_backfill`, `processed_fills_max`, `lookback_hours`, `mid_reconcile_*`, `reconcile_on_sell_attempt`
 - **WS/REST**: reconnect backoff, retry budgets, soft RPS limit.
 
@@ -156,7 +157,7 @@ place_order → (maker? limit : market)
 
 - Add new advisors to `strategy.py`; wire thresholds into `AdvisorSettings`.
 - Extend Quartermaster with trailing‑stop logic.
-- Add per‑product EMA/confirm overrides via `ema_params_per_product`.
+- Add per‑coin EMA/confirm overrides via `ema_params_per_coin`.
 - Enrich AutoTune with KPI‑weighted offset learning.
 
 ---
