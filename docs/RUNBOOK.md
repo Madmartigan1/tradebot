@@ -175,6 +175,7 @@ Artifacts:
 ---
 
 ## 11) Default coins traded:
+```
 | ETH-USD   | XRP-USD  | ADA-USD  |
 | TRAC-USD  | ALGO-USD | XLM-USD  |
 | HBAR-USD  | NEAR-USD | SOL-USD  |
@@ -183,7 +184,7 @@ Artifacts:
 | DOT-USD   | ARB-USD  | IP-USD   |
 | FLOKI-USD | PEPE-USD | BONK-USD |
 | SEI-USD   | SHIB-USD | POL-USD  |
-
+```
 
 ## 12) Glossary
 
