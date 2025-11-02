@@ -2,7 +2,7 @@
 
 > Version: v1.1.4 (Quartermaster + Local Candle Settle + richer CLI)
 
-This document maps the moving parts of the bot, how they interact, and where the key extension points live. It reflects the codebase you shared:
+This document maps the moving parts of the bot, how they interact, and where the key extension points live:
 
 - `main.py`
 - `bot/config.py`
