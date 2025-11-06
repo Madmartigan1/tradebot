@@ -1,8 +1,8 @@
 # Coinbase Trade Bot — Runbook
 
-> Version: v1.1.4
+> Version: v1.1.5
 
-This runbook covers setup, startup, monitoring, and common issues.
+This runbook covers setup, startup, monitoring, and common issues. It assumes the codebase and config you provided.
 
 ---
 
@@ -49,15 +49,15 @@ Run:
 python main.py
 ```
 Common flags you may want immediately:
-```
-# dry-run with a small universe
-python main.py --dry-run 1 --coins=BTC-USD,ETH-USD,SOL-USD
-
-# fix your own parameters (skip AutoTune)
-python main.py --enable-autotune=0 --confirm-candles=1 --deadband=4 --cooldown-time=200
-
-# local candle aggregation and larger maker offset
-python main.py --candle-mode=local --maker-offset=18
++```
++# dry-run with a small universe
++python main.py --dry-run 1 --coins=BTC-USD,ETH-USD,SOL-USD
++
++# fix your own parameters (skip AutoTune)
++python main.py --enable-autotune=0 --confirm-candles=1 --deadband=4 --cooldown-time=200
++
++# local candle aggregation and larger maker offset
++python main.py --candle-mode=local --maker-offset=18
 ```
 
 Expected early log lines:
@@ -175,7 +175,6 @@ Artifacts:
 ---
 
 ## 11) Default coins traded:
-```
 | ETH-USD   | XRP-USD  | ADA-USD  |
 | TRAC-USD  | ALGO-USD | XLM-USD  |
 | HBAR-USD  | NEAR-USD | SOL-USD  |
@@ -184,7 +183,7 @@ Artifacts:
 | DOT-USD   | ARB-USD  | IP-USD   |
 | FLOKI-USD | PEPE-USD | BONK-USD |
 | SEI-USD   | SHIB-USD | POL-USD  |
-```
+
 
 ## 12) Glossary
 
