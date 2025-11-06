@@ -1,4 +1,4 @@
-# main.py (v1.1.4 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
+# main.py (v1.1.5 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
@@ -483,83 +483,87 @@ def _load_keys_from_envfile():
 
     return api_key, api_secret, portfolio_id
 
-def _elapsed_autotune_once_with_bot(
+def _elapsed_autotune_periodic_with_bot(
     bot: TradeBot,
     api_key: str,
     api_secret: str,
     portfolio_id: Optional[str],
 ):
     """
-    One-shot AutoTune run after AUTOTUNE_ELAPSED_REFRESH_HOURS, reusing the
-    existing authenticated REST client from the running TradeBot instance.
+    Periodic AutoTune: run every AUTOTUNE_ELAPSED_REFRESH_HOURS, reusing the
+    authenticated REST client from the running TradeBot instance.
     """
     logger = logging.getLogger("autotune-elapsed")
 
     if not getattr(CONFIG, "autotune_enabled", False):
         return
 
-    # Wait until the elapsed window passes (but allow clean shutdown)
-    target_sec = int(AUTOTUNE_ELAPSED_REFRESH_HOURS * 3600)
+    period_sec = max(1, int(AUTOTUNE_ELAPSED_REFRESH_HOURS * 3600))
     step = 5
+    # First firing occurs after N hours from bot start, then every N hours thereafter.
+    next_run = _run_start_monotonic + period_sec
+
     while not _shutdown_once.is_set():
-        if (time.monotonic() - _run_start_monotonic) >= target_sec:
+        # Sleep in small steps for responsiveness to shutdowns
+        while not _shutdown_once.is_set() and time.monotonic() < next_run:
+            time.sleep(step)
+
+        if _shutdown_once.is_set() or getattr(bot, "stop_requested", False):
+            try:
+                logger.info("Skipped AUTOTUNE(elapsed): Exiting bot...")
+            except Exception:
+                pass
             break
-        time.sleep(step)
 
-    # If shutdown was requested during (or just after) the wait window, bail out cleanly.
-    if _shutdown_once.is_set() or getattr(bot, "stop_requested", False):
         try:
-            logger.info("Skipped AUTOTUNE(elapsed): Exiting bot...")
-        except Exception:
-            pass
-        return
+            logger.info("AUTOTUNE (elapsed): starting periodic update…")
+            summary = autotune_config(
+                CONFIG,
+                api_key=api_key or "",
+                api_secret=api_secret or "",
+                portfolio_id=portfolio_id,
+                rest=getattr(bot, "rest", None),  # reuse the running bot's client
+                preview_only=getattr(CONFIG, "autotune_preview_only", True),
+            )
+            # Keep results scoped to active coins only
+            active = set(getattr(CONFIG, "coin_ids", []))
+            offsets = {k: v for k, v in (summary.get("offsets_changed") or {}).items() if k in active}
+            summary["offsets_changed"] = offsets
+            disabled = [p for p in (summary.get("disabled_coins") or []) if p in active]
+            summary["disabled_coins"] = disabled
 
-    try:
-        logger.info("AUTOTUNE (elapsed): starting one-shot update…")
-        summary = autotune_config(
-            CONFIG,
-            api_key=api_key or "",
-            api_secret=api_secret or "",
-            portfolio_id=portfolio_id,
-            rest=getattr(bot, "rest", None),  # reuse the running bot's client
-            preview_only=getattr(CONFIG, "autotune_preview_only", True),
-        )
-        # Keep AutoTune results scoped to currently active coins
-        active = set(getattr(CONFIG, "coin_ids", []))
-        offsets = {k: v for k, v in (summary.get("offsets_changed") or {}).items() if k in active}
-        summary["offsets_changed"] = offsets
-        disabled = [p for p in (summary.get("disabled_coins") or []) if p in active]
-        summary["disabled_coins"] = disabled
-        logger.info(
-            "AUTOTUNE(elapsed %dh): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
-            AUTOTUNE_ELAPSED_REFRESH_HOURS,
-            summary.get("mode"),
-            summary.get("portfolio_regime"),
-            summary.get("winner"),
-            float(summary.get("share") or 0.0),
-            float(summary.get("alpha") or 0.0),
-        )
-        logger.info("AUTOTUNE(elapsed) votes: %s", summary.get("portfolio_vote"))
-        logger.info("AUTOTUNE(elapsed) knob changes: %s", summary.get("global_changes"))
+            logger.info(
+                "AUTOTUNE(elapsed %dh): mode=%s | regime=%s | winner=%s | share=%.2f | alpha=%.2f",
+                AUTOTUNE_ELAPSED_REFRESH_HOURS,
+                summary.get("mode"),
+                summary.get("portfolio_regime"),
+                summary.get("winner"),
+                float(summary.get("share") or 0.0),
+                float(summary.get("alpha") or 0.0),
+            )
+            logger.info("AUTOTUNE(elapsed) votes: %s", summary.get("portfolio_vote"))
+            logger.info("AUTOTUNE(elapsed) knob changes: %s", summary.get("global_changes"))
 
-        # Offsets: guard + show only active coins
-        active = set(getattr(CONFIG, "coin_ids", []))
-        offsets_all = summary.get("offsets_changed") or summary.get("offsets") or {}
-        if isinstance(offsets_all, dict):
-            offsets_active = {k: v for k, v in offsets_all.items() if k in active}
-            if offsets_active:
-                logger.info("AUTOTUNE(elapsed) offsets (active only): %s", offsets_active)
+            offsets_all = summary.get("offsets_changed") or summary.get("offsets") or {}
+            if isinstance(offsets_all, dict):
+                offsets_active = {k: v for k, v in offsets_all.items() if k in active}
+                if offsets_active:
+                    logger.info("AUTOTUNE(elapsed) offsets (active only): %s", offsets_active)
+                else:
+                    logger.info("AUTOTUNE(elapsed) offsets: (none for active set)")
             else:
-                logger.info("AUTOTUNE(elapsed) offsets: (none for active set)")
-        else:
-            logger.info("AUTOTUNE(elapsed) offsets: (not provided)")
+                logger.info("AUTOTUNE(elapsed) offsets: (not provided)")
 
-        cands = (summary.get("disabled_coins") or []) if isinstance(summary, dict) else []
-        if cands:
-            logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s", cands)
-        logger.info("AUTOTUNE (elapsed): complete.")
-    except Exception as e:
-        logger.exception("AUTOTUNE (elapsed) failed: %s", e)
+            cands = (summary.get("disabled_coins") or []) if isinstance(summary, dict) else []
+            if cands:
+                logger.info("AUTOTUNE(elapsed, advisory only) would disable: %s", cands)
+            logger.info("AUTOTUNE (elapsed): complete.")
+        except Exception as e:
+            logger.exception("AUTOTUNE (elapsed) failed: %s", e)
+
+        # Schedule the next run; if we fell behind (sleep or pause), catch up.
+        now_mono = time.monotonic()
+        next_run = max(next_run + period_sec, now_mono + period_sec)
 
 def _request_shutdown(bot: TradeBot | None, code: int = 0):
     if not _shutdown_once.is_set():
@@ -630,6 +634,8 @@ def main():
     
     # Validate + coerce the global CONFIG in place
     validate_config(CONFIG)
+    if getattr(CONFIG, "dry_run", False):
+        logging.warning("******** DRY RUN MODE: NO LIVE ORDERS WILL BE SENT ********")
     
     # --- v1.0.4 key loading (from APIkeys.env) ---
     api_key, api_secret, portfolio_id = _load_keys_from_envfile()
@@ -745,7 +751,7 @@ def main():
     # Optional: one-shot elapsed AutoTune refresh
     if AUTOTUNE_ELAPSED_REFRESH_ENABLED and getattr(CONFIG, "autotune_enabled", False):
         t = threading.Thread(
-            target=_elapsed_autotune_once_with_bot,
+            target=_elapsed_autotune_periodic_with_bot,
             args=(bot, api_key, api_secret, portfolio_id),
             name="autotune-elapsed",
             daemon=True,
