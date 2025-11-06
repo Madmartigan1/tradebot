@@ -3,6 +3,29 @@
 All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
+
+## [1.1.5] – 2025-11-06
+### Added
+- **Periodic AutoTune refresh:** the elapsed AutoTune thread now runs **every `AUTOTUNE_ELAPSED_REFRESH_HOURS`** (default 3h), instead of only once after startup.  
+  The schedule is continuous — 3h, 6h, 9h, and so on — using the live REST client for efficient tuning.
+- **Dry-run banner:** a clear startup warning now prints whenever `dry_run=True` —  
+  `******** DRY RUN MODE: NO LIVE ORDERS WILL BE SENT ********`
+- **Improved shutdown awareness:** the periodic AutoTune gracefully skips runs during shutdown and resumes normal timing afterward.
+
+### Changed
+- The `_elapsed_autotune_once_with_bot()` helper was replaced with `_elapsed_autotune_periodic_with_bot()` for cleaner scheduling.
+- The AutoTune thread comment and log messages updated to reflect periodic mode.
+- Minor startup log clarity tweaks in `main.py`.
+
+### Notes
+- Fully backward-compatible with v1.1.4 state and config files.
+- AutoTune cadence is configurable via config.py:
+  ```python
+  AUTOTUNE_ELAPSED_REFRESH_ENABLED = True
+  AUTOTUNE_ELAPSED_REFRESH_HOURS = 3
+  ```
+  
+
 ## [1.1.4] – 2025-10-29
 ### Added
 - **Comprehensive CLI overrides** — nearly every tunable runtime parameter can now be set from the command line:
