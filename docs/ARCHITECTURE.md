@@ -1,8 +1,8 @@
 # Coinbase Trade Bot — Architecture
 
-> Version: v1.1.4 (Quartermaster + Local Candle Settle + richer CLI)
+> Version: v1.1.5 (Quartermaster + Local Candle Settle + richer CLI)
 
-This document maps the moving parts of the bot, how they interact, and where the key extension points live:
+This document maps the moving parts of the bot, how they interact, and where the key extension points live. It reflects the codebase you shared:
 
 - `main.py`
 - `bot/config.py`
