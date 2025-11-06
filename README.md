@@ -1,4 +1,4 @@
-# Tradebot v1.1.4
+# Tradebot v1.1.5
 
 [![Latest version](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver&include_prereleases)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -63,7 +63,11 @@ Together they form a chain of command:
 
 ---
 
-## ✨ v1.1.4 Highlights
+## ✨ v1.1.5 Highlights
+**Periodic AutoTune refresh** — AutoTune now re-runs automatically every 3 hours (or whatever value you set in `AUTOTUNE_ELAPSED_REFRESH_HOURS`), continuously adapting to market shifts without restart.
+- **Dry-run safety banner** — When `dry_run=True`, the bot clearly prints:
+  `******** DRY RUN MODE: NO LIVE ORDERS WILL BE SENT ********`
+- **Clean shutdown handling** — Periodic AutoTune and reconcile threads exit gracefully when you stop the bot.
 - **Full CLI parameterization** — Nearly every runtime value can now be set directly from the command line:
   ```bash
   python main.py --enable-autotune=0 --confirm-candles=1 --cooldown-time=200 --deadband=4
