@@ -1,4 +1,4 @@
-# bot/persistence.py
+# bot/persistence.py v1.1.6
 import json, os, io, time
 from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
@@ -63,6 +63,7 @@ class SpendTracker:
     def __init__(self, retention_days: int = 14):
         self.retention_days = retention_days
         self.data = load_json(DAILY_FILE, {})
+        self._last_reset_date = datetime.now(timezone.utc).date()
 
     def _day_key(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -76,6 +77,16 @@ class SpendTracker:
 
     def today_total(self) -> float:
         return float(self.data.get(self._day_key(), 0.0))
+
+    def reset_if_new_day(self) -> bool:
+        """Reset the daily spend total if the UTC day has changed. Return True if reset occurred."""
+        today_utc = datetime.now(timezone.utc).date()
+        if self._last_reset_date != today_utc:
+            self._last_reset_date = today_utc
+            self.data[self._day_key()] = 0.0
+            save_json(DAILY_FILE, self.data)
+            return True
+        return False
 
     def _prune_old(self):
         try:
