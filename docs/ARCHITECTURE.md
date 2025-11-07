@@ -1,6 +1,6 @@
 # Coinbase Trade Bot — Architecture
 
-> Version: v1.1.5 (Quartermaster + Local Candle Settle + richer CLI)
+> Version: v1.1.6 (Autotune EMA + Final polish)
 
 This document maps the moving parts of the bot, how they interact, and where the key extension points live. It reflects the codebase you shared:
 
@@ -50,7 +50,7 @@ The bot is an EMA crossover system with advisor vetoes (RSI/MACD), optional make
 
 - **Indicators** (`indicators.py`)
   - `EMA`, `RSI`, `MACD` updated on **candle close**.
-  - Per‑coin EMA params with global defaults and overrides.
+  - EMA periods (`short_ema`, `long_ema`) are now also AutoTune-adjustable — tuned every few hours (default 3h).
 
 - **Signal engine**
   - Computes **relative** trend using EMA cross with deadband (`ema_deadband_bps`).
@@ -89,7 +89,7 @@ The bot is an EMA crossover system with advisor vetoes (RSI/MACD), optional make
 
 - **AutoTune** (`autotune.py`)
   - Computes regime votes on a separate timeframe (`autotune_vote_interval`, default 15m) using its lookback.
-  - Applies **bounded** knob nudges (confirm, cooldown, RSI/MACD, deadband, per‑coin offsets) depending on winner or blend share.
+  - Applies **bounded** knob nudges (confirm, cooldown, RSI/MACD, deadband, short_ema/long_ema, per‑coin offsets) depending on winner or blend share.
   - Logs regime and deltas; trading timeframe remains at the candle interval (e.g., 5m).
 
 ---

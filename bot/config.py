@@ -1,4 +1,4 @@
-# ----v1.1.3----
+# ----v1.1.6----
 # bot/config.py
 import logging
 from dataclasses import dataclass, field
@@ -30,6 +30,11 @@ def validate_config(cfg: "BotConfig"):
     # REST soft limit sanity
     if getattr(cfg, "rest_rps_soft_limit", 8.0) <= 0:
         cfg.rest_rps_soft_limit = 8.0
+        safe = False
+    if getattr(cfg, "long_ema", 120) - getattr(cfg, "short_ema", 40) < 10:
+        logging.warning("Config: short_ema(%s) and long_ema(%s) too close; enforcing minimum gap of 10 (using safe 40/120).",
+                        getattr(cfg, "short_ema", None), getattr(cfg, "long_ema", None))
+        cfg.short_ema, cfg.long_ema = 40, 120
         safe = False
     if not safe:
         logging.info("Config validation applied safe coercions.")

@@ -1,4 +1,4 @@
-# Tradebot v1.1.5
+# Tradebot v1.1.6
 
 [![Latest version](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver&include_prereleases)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -63,8 +63,12 @@ Together they form a chain of command:
 
 ---
 
-## ✨ v1.1.5 Highlights
-**Periodic AutoTune refresh** — AutoTune now re-runs automatically every 3 hours (or whatever value you set in `AUTOTUNE_ELAPSED_REFRESH_HOURS`), continuously adapting to market shifts without restart.
+## ✨ v1.1.6 Highlights
+- **Periodic AutoTune refresh** — AutoTune now re-runs automatically every 3 hours (or whatever value you set in `AUTOTUNE_ELAPSED_REFRESH_HOURS`), continuously adapting to market shifts without restart.
+- **AutoTune learns EMA periods** — the Navigator (AutoTune) now adjusts `short_ema` and `long_ema` every 3 hours (default).  
+  It ensures safe, spaced-out EMA pairs (e.g. 40/120 → 35/110), adapting to volatility while avoiding overfitting.
+- **Banner branding** — The bot proudly launches under the name **VODAN** with a stylized console banner.
+- **Dry-run still simulates spend** — to mimic real trading exposure while placing no live orders.
 - **Dry-run safety banner** — When `dry_run=True`, the bot clearly prints:
   `******** DRY RUN MODE: NO LIVE ORDERS WILL BE SENT ********`
 - **Clean shutdown handling** — Periodic AutoTune and reconcile threads exit gracefully when you stop the bot.

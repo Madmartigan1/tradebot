@@ -1,4 +1,4 @@
-# bot/tradebot.py — v1.1.4
+# bot/tradebot.py — v1.1.6
 # Adds:
 #  - Quartermaster exits (x% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
@@ -1325,6 +1325,13 @@ class TradeBot:
                     f"{macd_hist:.5f}" if macd_hist is not None else "n/a",
                 )
                 return
+
+        # Log when a new UTC day begins and cap resets
+        if self.spend.reset_if_new_day():
+            logging.info("New UTC day detected. Resetting daily spend cap counters.")
+            logging.info("Spend cap=$%.2f | spent today=$0.00",
+                         float(getattr(self.cfg, "daily_spend_cap_usd", 0.0)))
+            self.daily_cap_reached_logged = False
 
         # BUY-only daily cap
         spent_today = self.spend.today_total()

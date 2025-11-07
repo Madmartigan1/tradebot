@@ -1,4 +1,4 @@
-# bot/autotune.py (v1.1.4) — telemetry + better BLEND tuning + caller-controlled lookback
+# bot/autotune.py (v1.1.6) — telemetry + better BLEND tuning + caller-controlled lookback
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -189,6 +189,8 @@ V102_CHOPPY = {
     "macd_buy_min": 2.0,
     "macd_sell_max": -2.0,
     "ema_deadband_bps": 6.0,
+    "short_ema": 40,
+    "long_ema": 120,
 }
 REGIME_TARGETS = {
     "choppy": V102_CHOPPY,
@@ -200,6 +202,8 @@ REGIME_TARGETS = {
         "macd_buy_min": 1.5,
         "macd_sell_max": -2.5,
         "ema_deadband_bps": 5.0,
+        "short_ema": 30,
+        "long_ema": 80,
     },
     "downtrend": {
         "confirm_candles": 2,
@@ -209,6 +213,8 @@ REGIME_TARGETS = {
         "macd_buy_min": 2.5,
         "macd_sell_max": -1.5,
         "ema_deadband_bps": 8.0,
+        "short_ema": 50,
+        "long_ema": 150,
     },
 }
 CLAMPS_BY_REGIME: Dict[str, Dict[str, Tuple[Optional[float], Optional[float]]]] = {
@@ -220,6 +226,8 @@ CLAMPS_BY_REGIME: Dict[str, Dict[str, Tuple[Optional[float], Optional[float]]]] 
         "macd_buy_min": (1.0, 3.0),
         "macd_sell_max": (-3.0, -1.0),
         "ema_deadband_bps": (5.0, 8.0),
+        "short_ema": (30, 50),
+        "long_ema": (80.0, 150.0),
     },
     "uptrend": {
         "confirm_candles": (1, 3),
@@ -229,6 +237,8 @@ CLAMPS_BY_REGIME: Dict[str, Dict[str, Tuple[Optional[float], Optional[float]]]] 
         "macd_buy_min": (1.0, 3.0),
         "macd_sell_max": (-3.0, -1.0),
         "ema_deadband_bps": (4.5, 8.0),
+        "short_ema": (10, 40),
+        "long_ema": (60.0, 120.0),
     },
     "downtrend": {
         "confirm_candles": (1, 3),
@@ -238,6 +248,8 @@ CLAMPS_BY_REGIME: Dict[str, Dict[str, Tuple[Optional[float], Optional[float]]]] 
         "macd_buy_min": (2.0, 4.0),
         "macd_sell_max": (-2.5, -1.0),
         "ema_deadband_bps": (4.5, 8.0),
+        "short_ema": (40, 60),
+        "long_ema": (120.0, 200.0),
     },
 }
 
@@ -276,6 +288,8 @@ BLEND_KNOBS = {
     "macd_buy_min",
     "macd_sell_max",
     "ema_deadband_bps",
+    "short_ema",
+    "long_ema",
 }
 
 OFFSET_FLOOR_MAJOR = 12.0
@@ -462,8 +476,10 @@ def autotune_config(
                 if lo is not None:
                     proposed = max(lo, min(hi, proposed))
 
-                # integers: confirm_candles and (for stability) per_coin_cooldown_s
-                if name in {"confirm_candles", "per_coin_cooldown_s"}:
+                # integers: confirm_candles, per_coin_cooldown_s, short_ema, long_ema
+                if name in {"short_ema", "long_ema"}:
+                    proposed = int(round(proposed / 5.0) * 5)    # round EMA periods to nearest 5
+                elif name in {"confirm_candles", "per_coin_cooldown_s"}:
                     proposed = int(round(proposed))
                 changes[name] = _apply_and_record(name, proposed)
             else:
@@ -514,6 +530,22 @@ def autotune_config(
         # Only actually "disable" if SNAP & non-choppy
         if allow_disabling:
             setattr(cfg, "coins_disabled", sorted(disabled))
+            
+    # Ensure short_ema is always at least 10 less than long_ema
+    if "short_ema" in changes and "long_ema" in changes:
+        se_old, se_new = changes["short_ema"]
+        le_old, le_new = changes["long_ema"]
+        if le_new < se_new + 10:
+            required = se_new + 10
+            if required > 200:
+                required = 200
+                se_new = min(se_new, required - 10)
+            if not preview_only:
+                setattr(cfg, "short_ema", se_new)
+                setattr(cfg, "long_ema", required)
+            le_new = required
+            changes["short_ema"] = (se_old, se_new)
+            changes["long_ema"] = (le_old, le_new)       
 
     knob_changes = {k: {"old": ov[0], "new": ov[1]} for k, ov in changes.items()}
     return {

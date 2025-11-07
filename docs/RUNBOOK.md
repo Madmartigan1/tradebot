@@ -1,6 +1,6 @@
 # Coinbase Trade Bot — Runbook
 
-> Version: v1.1.5
+> Version: v1.1.6
 
 This runbook covers setup, startup, monitoring, and common issues. It assumes the codebase and config you provided.
 
@@ -25,12 +25,12 @@ pip install -r requirements.txt
 - **Mode**: `mode = "ws"` for server candles or `"local"` for local aggregation from tickers.
 - **Interval**: `candle_interval = "5m"` (maps to 300s).
 - **Warm‑up**: `warmup_candles` (REST backfill on startup), `min_candles` (must be ≥ long EMA + confirms), `confirm_candles`.
-- **EMA**: `short_ema=40, long_ema=120` (5m baseline). Optionally per‑coin overrides.
+- **EMA**: `short_ema=40, long_ema=120` (5m baseline). AutoTune adjusts these if enabled. Optionally per‑coin overrides.
 - **Advisors**: `enable_advisors=True`, set RSI/MACD thresholds.
 - **Quartermaster**: `enable_quartermaster=True`, set `take_profit_bps`, `max_hold_hours`, `stagnation_close_bps`.
 - **Risk & spend**: `usd_per_order`, `daily_spend_cap_usd`, `per_coin_cooldown_s`, `hard_stop_bps`.
 - **Orders**: `prefer_maker=True`, `prefer_maker_for_sells=True`, `maker_offset_bps_per_coin`.
-- **AutoTune**: `autotune_*` knobs; trading timeframe stays 5m.
+- **Autotune**: `autotune_*` knobs; trading timeframe stays 5m.
 - **Validation**: ensure `validate_config(CONFIG)` is called after `CONFIG = BotConfig()` in `config.py` or at import time from `main.py`.
 
 ---
