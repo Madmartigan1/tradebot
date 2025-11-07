@@ -1,4 +1,4 @@
-# main.py (v1.1.5 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
+# main.py (v1.1.6 — APIkeys.env like v1.0.4; hybrid AutoTune; Windows-friendly Ctrl+C; telemetry with detail added)
 import os
 import sys
 import time
@@ -147,6 +147,7 @@ def parse_cli_overrides(argv=None):
         "AutoTune may override at runtime:",
         "  • confirm_candles",
         "  • per_coin_cooldown_s",
+        "  • short_ema, long_ema (EMA lengths)",
         "  • rsi_buy_max, rsi_sell_min",
         "  • macd_buy_min, macd_sell_max",
         "  • ema_deadband_bps",
@@ -154,7 +155,6 @@ def parse_cli_overrides(argv=None):
         "",
         "AutoTune does NOT change:",
         "  • candle_interval, mode (ws/local)",
-        "  • short_ema, long_ema (EMA lengths)",
         "  • usd_per_order, daily_spend_cap_usd",
         "  • prefer_maker / prefer_maker_for_sells",
         "  • stop-loss (hard_stop_bps)",
