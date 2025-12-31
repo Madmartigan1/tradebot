@@ -85,7 +85,7 @@ class BotConfig:
     #                             ceil(autotune_vote_min_candles * 15min))
     # We changed the detector’s minimum to require ≥120 candles (EMA long = 120),
     # so 36h ≈ 144×15m satisfies the requirement and yields non-choppy classifications.
-    autotune_lookback_hours: int = 36         
+    autotune_lookback_hours: int = 18         
     # =====================================================================================
     
     # --- Regime voting (decoupled from trading candles) ---
@@ -96,7 +96,7 @@ class BotConfig:
     # Effective voting window:
     #   hours_used_for_vote = max(autotune_lookback_hours,
     #                             ceil(autotune_vote_min_candles * interval_seconds / 3600))
-    autotune_vote_min_candles: int = 144
+    autotune_vote_min_candles: int = 72
     # ------------------------------------------------------
     
     # Quartermaster exits
@@ -230,3 +230,4 @@ class BotConfig:
     telemetry_heartbeat_s: int = 300   # 5 min; set 0 to disable
 
 CONFIG = BotConfig()
+
