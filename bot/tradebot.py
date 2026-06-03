@@ -1,4 +1,4 @@
-# bot/tradebot.py — v1.1.6
+# bot/tradebot.py — v1.1.7
 # Adds:
 #  - Quartermaster exits (x% take-profit; time-in-trade stagnation)
 #  - Reason tagging for orders → trades.csv (entry_reason/exit_reason)
@@ -1992,10 +1992,6 @@ class TradeBot:
                     # cooldown + throttle + dust guard
                     cooldown_s = int(getattr(self.cfg, "per_coin_cooldown_s", getattr(self.cfg, "cooldown_sec", 300)))
                     now_ts = time.time()
-                    # Dust/threshold suppression window honored
-                    if now_ts < float(self._qm_dust_suppress_until[coin_id] or 0.0):
-                        return
-                    # Require at least one increment or min-market base size (optionally buffered)
                     try:
                         base_inc = float(self.base_inc.get(coin_id, 1e-8))
                     except Exception:
@@ -2004,7 +2000,10 @@ class TradeBot:
                     sell_floor = max(base_inc, min_mkt)
                     buffer_mult = 1.0  # keep exact-inc allowed; raise to 1.1 for extra safety if desired
                     sell_required = sell_floor * buffer_mult
-                    if held_qty + 1e-18 < sell_required:
+
+                    if now_ts < float(self._qm_dust_suppress_until[coin_id] or 0.0):
+                        pass  # in suppression window; skip QM, fall through to EMA captain
+                    elif held_qty + 1e-18 < sell_required:
                         suppress_min = 30  # configurable if needed
                         self._qm_dust_suppress_until[coin_id] = now_ts + suppress_min * 60
                         logging.info(
@@ -2012,24 +2011,22 @@ class TradeBot:
                             "(held=%.10f < required=%.10f, inc=%g, min_mkt=%.10f).",
                             coin_id, suppress_min, held_qty, sell_required, base_inc, min_mkt
                         )
-                        return
-                        
-                    if not self.last.ok(coin_id, cooldown_s):
-                        return
-                    if now_ts - float(self._qm_last_ts[coin_id] or 0.0) < min(60, cooldown_s):
-                        return
-                    min_base = float(self.base_inc.get(coin_id, 1e-8))
-                    if held_qty < (min_base * 0.99):
-                        return
-
-                    quote_usd = held_qty * close_price
-                    logging.info("Quartermaster triggered SELL attempt %s: held=%.10f close=%.8f reason=%s",
-                                 coin_id, held_qty, close_price, qm_reason)
-                    # Actually place the exit order
-                    self.place_order(coin_id, side="SELL", quote_usd=quote_usd,
-                                     last_price=close_price, reason=qm_reason)
-                    self._qm_last_ts[coin_id] = now_ts
-                    return  # one decisive action per candle per coin
+                        # fall through to EMA captain
+                    elif not self.last.ok(coin_id, cooldown_s):
+                        pass  # cooldown active; skip QM, fall through to EMA captain
+                    elif now_ts - float(self._qm_last_ts[coin_id] or 0.0) < min(60, cooldown_s):
+                        pass  # throttle; skip QM, fall through to EMA captain
+                    elif held_qty < (base_inc * 0.99):
+                        pass  # below min base; skip QM, fall through to EMA captain
+                    else:
+                        quote_usd = held_qty * close_price
+                        logging.info("Quartermaster triggered SELL attempt %s: held=%.10f close=%.8f reason=%s",
+                                     coin_id, held_qty, close_price, qm_reason)
+                        # Actually place the exit order
+                        self.place_order(coin_id, side="SELL", quote_usd=quote_usd,
+                                         last_price=close_price, reason=qm_reason)
+                        self._qm_last_ts[coin_id] = now_ts
+                        return  # one decisive action per candle per coin after a real QM sell
         except Exception as _e:
             logging.debug("Quartermaster check failed for %s: %s", coin_id, _e)
 

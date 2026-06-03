@@ -304,8 +304,18 @@ OFFSET_FLOOR_GLOBAL = 6.0
 _QUANTUM_BPS = 0.5
 # Ignore tiny moves below this (bps)
 _MIN_VISIBLE_BPS = 0.25
-# Per-vote safety cap (bps)
-_MAX_DELTA_PER_VOTE_BPS = 2.0
+# Per-vote delta cap — units match each knob's native scale (not always bps)
+_MAX_DELTA_PER_VOTE = {
+    "ema_deadband_bps":    2.0,   # bps
+    "macd_buy_min":        2.0,   # bps
+    "macd_sell_max":       2.0,   # bps
+    "rsi_buy_max":         2.0,   # index points
+    "rsi_sell_min":        2.0,   # index points
+    "confirm_candles":     1.0,   # candles
+    "per_coin_cooldown_s": 60.0,  # seconds; allows ~3-5 cycles to converge
+    "short_ema":           5.0,   # periods; aligns with nearest-5 rounding
+    "long_ema":            10.0,  # periods
+}
 # Per-knob weights: faster/slower “learning rates”
 _KNOB_WEIGHT = {
     "ema_deadband_bps": 1.0,   # most responsive
@@ -335,12 +345,14 @@ def _quantize_bps(x: float) -> float:
 def _apply_knob_blend(cur: float, target: float, alpha: float, knob_name: str) -> float:
     """
     Blend toward target, apply knob weight, cap per-vote delta, and quantize.
-    Units are 'bps' for bps-style knobs; integer knobs will be rounded later.
+    Cap magnitude is knob-specific (see _MAX_DELTA_PER_VOTE); integer knobs are
+    rounded to their native unit by the caller.
     """
     w = _KNOB_WEIGHT.get(knob_name, 1.0)
     blended = cur + (target - cur) * alpha * w
     # cap per-vote change to avoid big jumps
-    delta = max(-_MAX_DELTA_PER_VOTE_BPS, min(_MAX_DELTA_PER_VOTE_BPS, blended - cur))
+    cap = _MAX_DELTA_PER_VOTE.get(knob_name, 2.0)
+    delta = max(-cap, min(cap, blended - cur))
     proposed = cur + delta
     q = _quantize_bps(proposed)
     # ignore float dust
