@@ -4,6 +4,62 @@ All notable changes to this project will be documented in this file.
 This format loosely follows *Keep a Changelog* and uses tags for versions.
 
 
+## [1.1.7] – 2026-06-03
+### Fixed
+- **RSI initialization (`indicators.py`):** The SMA seed phase now correctly accumulates
+  `period` deltas before switching to Wilder's smoothing. Previously the `None` sentinel
+  was cleared on the very first update, so the accumulator exited after a single delta and
+  immediately applied Wilder's EMA with only one data point as the base. RSI values were
+  inaccurate for the entire warmup period, potentially causing the advisor veto to fire on
+  bad data.
+- **Quartermaster dust suppression silencing EMA captain (`tradebot.py`):** The early
+  `return` statements inside the `if qm_ok:` block have been restructured into an
+  `if/elif/else` chain. Previously, when QM detected a dust position (too small to sell),
+  the `return` exited `_on_candle_close` entirely — silencing EMA BUY signals for up to
+  30 minutes as an unintended side effect. Now only a successfully placed QM sell triggers
+  an early exit; all guard/skip conditions fall through to `evaluate_signal`.
+- **AutoTune BLEND mode delta caps too small for non-BPS knobs (`autotune.py`):** Replaced
+  the single `_MAX_DELTA_PER_VOTE_BPS = 2.0` constant with a per-knob `_MAX_DELTA_PER_VOTE`
+  dict. The old cap applied BPS-unit scaling to all knobs, making `per_coin_cooldown_s`
+  adjustments effectively inert in BLEND mode (2-second max change per cycle against a
+  300–1800s range). New caps: `per_coin_cooldown_s = 60s`, `short_ema = 5`,
+  `long_ema = 10`; all BPS-scale knobs unchanged at `2.0`.
+
+### Removed
+- Duplicate `docs/CHANGELOG.md`; canonical changelog is at the repo root.
+
+### Notes
+- No config schema or CSV format changes. Fully backward-compatible with v1.1.6 state files.
+- The RSI fix affects only the warmup period (first `rsi_period` candles after startup or
+  reset). Post-warmup RSI behavior is unchanged.
+- The QM restructure is logic-only; Quartermaster sell behavior itself is unchanged — only
+  the unintended suppression of the EMA captain during dust windows is corrected.
+
+
+## [1.1.6] – 2025-12-20
+
+### Added
+- **EMA tuning via AutoTune:** `short_ema` and `long_ema` are now tunable knobs during regime-based blending.
+  AutoTune adjusts them gradually (in steps of 5), with safeguards to maintain `long_ema ≥ short_ema + 10`.
+- **EMA safety guard:** The tuning logic ensures that `long_ema` never gets too close to or lower than `short_ema`, 
+  capping the minimum gap at 10 periods.
+- **Launch banner:** At startup, a stylized "VODAN" ASCII banner prints to clearly mark the bot's identity.
+- **Daily spend cap logging:** Improved logging when a new UTC day begins, showing spend cap values and reset notifications.
+
+### Changed
+- `autotune.py` updated to round EMA periods to nearest 5 and clamp within regime-defined ranges.
+- BLEND logic now includes EMA knobs (`short_ema`, `long_ema`) along with RSI, MACD, cooldown, and per-coin offsets.
+- Regime targets updated to include safe EMA pairs for each market condition (choppy/uptrend/downtrend).
+- Logging improved during AutoTune to clarify blended values and clamped outcomes.
+- `config.py` validation now enforces minimum 10-period gap between short and long EMAs.
+- Documentation updated (`ARCHITECTURE.md`, `RUNBOOK.md`) to reflect EMA as a tunable parameter.
+
+### Notes
+- Backward-compatible with v1.1.5 sessions and `.state` files.
+- Dry-run and daily spend behaviors remain unchanged — spend tracking is preserved in dry-run to simulate real exposure.
+- EMA adjustment frequency matches AutoTune refresh interval (default: 3 hours via `AUTOTUNE_ELAPSED_REFRESH_HOURS`).
+
+
 ## [1.1.5] – 2025-11-06
 ### Added
 - **Periodic AutoTune refresh:** the elapsed AutoTune thread now runs **every `AUTOTUNE_ELAPSED_REFRESH_HOURS`** (default 3h), instead of only once after startup.  

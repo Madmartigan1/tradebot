@@ -44,17 +44,20 @@ class RSI:
         gain = change if change > 0.0 else 0.0
         loss = -change if change < 0.0 else 0.0
 
-        if self._avg_gain is None or self._avg_loss is None:
+        if self._deltas_seen < self.period:
+            # SMA accumulation phase: sum gains/losses until we have `period` deltas
+            if self._avg_gain is None:
+                self._avg_gain = gain
+                self._avg_loss = loss
+            else:
+                self._avg_gain += gain
+                self._avg_loss += loss
             self._deltas_seen += 1
-            self._avg_gain = (0.0 if self._avg_gain is None else self._avg_gain) + gain
-            self._avg_loss = (0.0 if self._avg_loss is None else self._avg_loss) + loss
-
             if self._deltas_seen >= self.period:
                 self._avg_gain /= self.period
                 self._avg_loss /= self.period
                 self.value = self._calc_rsi(self._avg_gain, self._avg_loss)
-            else:
-                self.value = None
+            
         else:
             n = self.period
             self._avg_gain = (self._avg_gain * (n - 1) + gain) / n
