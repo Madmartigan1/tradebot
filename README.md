@@ -1,4 +1,4 @@
-# Tradebot v1.1.6
+# Tradebot v1.1.7
 
 [![Latest version](https://img.shields.io/github/v/release/Madmartigan1/tradebot?sort=semver&include_prereleases)](https://github.com/Madmartigan1/tradebot/releases)
 [![License](https://img.shields.io/github/license/Madmartigan1/tradebot)](LICENSE)
@@ -63,37 +63,38 @@ Together they form a chain of command:
 
 ---
 
-## ✨ v1.1.6 Highlights
-- **Periodic AutoTune refresh** — AutoTune now re-runs automatically every 3 hours (or whatever value you set in `AUTOTUNE_ELAPSED_REFRESH_HOURS`), continuously adapting to market shifts without restart.
-- **AutoTune learns EMA periods** — the Navigator (AutoTune) now adjusts `short_ema` and `long_ema` every 3 hours (default).  
-  It ensures safe, spaced-out EMA pairs (e.g. 40/120 → 35/110), adapting to volatility while avoiding overfitting.
-- **Banner branding** — The bot proudly launches under the name **VODAN** with a stylized console banner.
-- **Dry-run still simulates spend** — to mimic real trading exposure while placing no live orders.
-- **Dry-run safety banner** — When `dry_run=True`, the bot clearly prints:
-  `******** DRY RUN MODE: NO LIVE ORDERS WILL BE SENT ********`
-- **Clean shutdown handling** — Periodic AutoTune and reconcile threads exit gracefully when you stop the bot.
-- **Full CLI parameterization** — Nearly every runtime value can now be set directly from the command line:
-  ```bash
-  python main.py --enable-autotune=0 --confirm-candles=1 --cooldown-time=200 --deadband=4
-  python main.py --quartermaster-profit=1200 --quartermaster-hold-time=36 --stop-loss=300
-  python main.py --candle-mode=local --candle-interval=1m --prefer-maker=1 --prefer-maker-for-sells=no
-  ```
+## ✨ v1.1.7 Highlights
+- **RSI initialization corrected** — The RSI indicator now properly seeds itself using a
+  simple average of the first `rsi_period` gains/losses before switching to Wilder's
+  smoothing. Previously it exited the seed phase after a single delta, producing inaccurate
+  RSI values throughout the warmup window and potentially causing the Skipper (RSI advisor)
+  to veto valid signals on bad data.
+- **AutoTune BLEND mode now moves non-BPS knobs meaningfully** — The per-vote delta cap
+  is now knob-specific. `per_coin_cooldown_s` was previously capped at 2 seconds per
+  AutoTune cycle (against a 300–1800s range), making the Navigator's cooldown adjustments
+  effectively inert in BLEND mode. It is now capped at 60s per cycle, allowing convergence
+  in 3–5 cycles.
+- **Quartermaster dust suppression no longer silences the Captain** — When QM detects a
+  dust position too small to sell, it no longer exits `_on_candle_close` entirely. The EMA
+  captain now continues to evaluate signals normally; only a successfully placed QM sell
+  triggers the early exit.
+
 ---
 
 ### 🔧 Upgrade notes
-- Improved BLEND functionality with autotune.
-- Added CLI overrides.
-- Backward-compatible with v1.0.9 state files.  
-- No CSV header changes.  
-- Daily-spend logic tightened to count only successfully accepted orders.
+- Pure bug fixes — no new config keys, no CSV header changes.
+- Fully backward-compatible with v1.1.6 state files.
+- RSI warmup behavior changes only during the first `rsi_period` candles after startup or
+  reset. Post-warmup RSI is unaffected.
 
 ---
 
 ### 🧑‍💻 Developer Notes
-- The CLI system now builds help text dynamically using live values from `config.py`.
-- Boolean flags use a unified `_BOOL_KW` parser shared across runtime and maker options.
-- Help epilog automatically includes both defaults and AutoTune behavior notes.
-
+- `_MAX_DELTA_PER_VOTE_BPS` in `autotune.py` replaced with per-knob `_MAX_DELTA_PER_VOTE`
+  dict. Any future knobs not explicitly listed fall back to `2.0`.
+- QM block in `_on_candle_close` restructured from early-`return` guards to `if/elif/else`
+  chain. Only the `else` branch (real QM sell placed) returns early.
+  
 ---
 
 ## ⚖️ Risk controls
